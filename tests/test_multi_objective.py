@@ -4,9 +4,8 @@ import numpy as np
 import pytest
 
 from coevo import (
-    ClippedPredictor,
+    NearestNeighborSurrogate,
     NSGA2,
-    RBFSurrogate,
     SurrogateMultiObjectiveEvaluator,
     TrueMultiObjectiveEvaluator,
     benchmarks,
@@ -82,11 +81,11 @@ def test_nsga2_converges_on_zdt1():
 def test_surrogate_mo_evaluator_reduces_evals_and_converges():
     problem = benchmarks.zdt1(dim=10)
     ev = SurrogateMultiObjectiveEvaluator(
-        problem, lambda: ClippedPredictor(RBFSurrogate()), eval_fraction=0.3, warmup=5
+        problem, lambda: NearestNeighborSurrogate(), eval_fraction=0.3, warmup=5
     )
     result = NSGA2(pop_size=100, generations=250, seed=1).optimize(problem, ev)
     assert result.true_evaluations < 100 + 100 * 250
-    assert igd(result.objectives, benchmarks.zdt1_front()) < 0.3
+    assert igd(result.objectives, benchmarks.zdt1_front()) < 0.1
 
 
 def test_true_mo_evaluator_counts():
