@@ -288,6 +288,35 @@ def _simplify_fixpoint(node: Node, functions: dict, max_iter: int = 6) -> Node:
     return node
 
 
+@dataclass
+class ParetoModel:
+    """One model on the accuracy-vs-complexity frontier, ready to apply.
+
+    Carries the expression tree, not just its rendering, so the model can be
+    scored on held-out data — which is the only way to tell a discovered law
+    from a memorised one.
+    """
+
+    expression: str
+    rmse: float
+    complexity: int
+    tree: Node
+    intercept: float
+    scale: float
+    functions: dict
+
+    def predict(self, X: np.ndarray) -> np.ndarray:
+        """Apply the model to ``X``, including its linear-scaling terms."""
+        X = _as_2d(X)
+        pred = _raw_eval(self.tree, X, self.functions)
+        if pred is None:
+            return np.full(len(X), self.intercept)
+        return self.intercept + self.scale * pred
+
+    def __str__(self) -> str:
+        return f"{self.expression}  [rmse={self.rmse:.4g}, complexity={self.complexity}]"
+
+
 class SymbolicRegressor:
     """Evolves a symbolic expression ``x -> fitness`` via genetic programming."""
 
@@ -414,22 +443,36 @@ class SymbolicRegressor:
             return 0.0, 1.0
         return linear_scale(pred, y)
 
-    def pareto_front(self) -> list[tuple[int, float, str]]:
-        """Non-dominated ``(complexity, rmse, expression)`` triples from the run.
+    def pareto_front(self) -> list["ParetoModel"]:
+        """Non-dominated models from this run, ordered by increasing complexity.
 
         Genetic programming visits far more of the accuracy/complexity trade-off
         than a single winner records. The hall of fame keeps the best expression
         seen at every size, so one run yields the whole front rather than one
         point — and there is no need to sweep the parsimony coefficient to
         approximate it.
+
+        Each entry is a :class:`ParetoModel`, which carries the expression tree
+        and so can be applied to new data. Returning only the rendered string
+        would make held-out evaluation impossible without re-parsing it.
         """
         best_so_far = inf
-        front: list[tuple[int, float, str]] = []
+        front: list[ParetoModel] = []
         for complexity in sorted(self.hall_of_fame_):
             rmse, tree, a, b = self.hall_of_fame_[complexity]
             if rmse < best_so_far:
                 best_so_far = rmse
-                front.append((complexity, rmse, self._render(tree, a, b)))
+                front.append(
+                    ParetoModel(
+                        expression=self._render(tree, a, b),
+                        rmse=float(rmse),
+                        complexity=int(complexity),
+                        tree=tree,
+                        intercept=a,
+                        scale=b,
+                        functions=self._functions,
+                    )
+                )
         return front
 
     def refine_constants(self, X: np.ndarray, y: np.ndarray) -> "SymbolicRegressor":

@@ -194,3 +194,38 @@ def test_refine_constants_survives_more_params_than_points():
         ),
     )
     model.refine_constants(np.array([[0.0], [1.0]]), np.array([0.5, 1.5]))  # 3 consts, 2 points
+
+
+def test_pareto_front_models_predict_on_new_data():
+    """Front entries must carry the model, not just its rendering."""
+    from coevo.surrogates.evolved import SymbolicRegressor
+
+    rng = np.random.default_rng(0)
+    X = rng.uniform(0.5, 6.0, size=(70, 1))
+    y = 3.0 * np.log(X[:, 0]) + 1.0
+    model = SymbolicRegressor(population_size=200, generations=25, seed=0, parsimony=0.01).fit(X, y)
+
+    front = model.pareto_front()
+    assert front, "hall of fame should not be empty"
+    assert [m.complexity for m in front] == sorted(m.complexity for m in front)
+    assert [m.rmse for m in front] == sorted((m.rmse for m in front), reverse=True)
+    for entry in front:
+        # the recorded rmse must be the one predict() actually achieves
+        actual = float(np.sqrt(np.mean((entry.predict(X) - y) ** 2)))
+        assert actual == pytest.approx(entry.rmse, rel=1e-6, abs=1e-9)
+        assert entry.predict(X[:5]).shape == (5,)
+
+
+def test_linear_scaling_expression_and_predict_agree():
+    from coevo.surrogates.evolved import SymbolicRegressor
+
+    rng = np.random.default_rng(2)
+    X = rng.uniform(0.0, 4.0, size=(60, 1))
+    y = 5.0 * X[:, 0] - 2.0
+    model = SymbolicRegressor(population_size=150, generations=20, seed=0).fit(X, y)
+    actual = float(np.sqrt(np.mean((model.predict(X) - y) ** 2)))
+    assert actual == pytest.approx(model.best_rmse_, rel=1e-6, abs=1e-9)
+    # complexity accounts for the affine wrapper it reports in the expression
+    from coevo.surrogates.evolved import _AFFINE_NODES, _size
+
+    assert model.complexity == _size(model.best_) + _AFFINE_NODES

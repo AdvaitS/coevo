@@ -32,6 +32,7 @@ from coevo.surrogates import (
     EvolvedPredictor,
     GaussianProcessSurrogate,
     NearestNeighborSurrogate,
+    ParetoModel,
     RBFSurrogate,
     RandomForestSurrogate,
     SymbolicRegressor,
@@ -60,5 +61,6 @@ __all__ = [
     "CoevolvedPredictor",
     "SymbolicRegressor",
     "EvolvedPredictor",
+    "ParetoModel",
     "benchmarks",
 ]
