@@ -198,7 +198,7 @@ class SymbolicRegressor:
                 best, best_fit = pop[gi], float(fits[gi])
 
         self.best_ = best
-        self.best_rmse_ = float(np.sqrt(max(best_fit - self.parsimony * _size(best), 0.0)))
+        self.best_rmse_ = float(max(best_fit - self.parsimony * _size(best), 0.0))
         if self.refine:
             self.refine_constants(X, y)
         return self
