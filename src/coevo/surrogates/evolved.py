@@ -133,6 +133,94 @@ def _to_str(node: Node, functions: dict) -> str:
     return render([_to_str(a, functions) for a in node.args])
 
 
+def _fold(node: Node, functions: dict) -> float:
+    """Evaluate a constant-only subtree to a scalar."""
+    if node.op == "c":
+        return node.val
+    fn = functions[node.op][0]
+    vals = [_fold(a, functions) for a in node.args]
+    out = fn(*[np.array([v], dtype=float) for v in vals])
+    return float(np.asarray(out).ravel()[0])
+
+
+def _same(a: Node, b: Node) -> bool:
+    """Structural equality of two expression trees."""
+    if a.op != b.op:
+        return False
+    if a.op == "x":
+        return a.idx == b.idx
+    if a.op == "c":
+        return abs(a.val - b.val) < 1e-12
+    return len(a.args) == len(b.args) and all(_same(x, y) for x, y in zip(a.args, b.args))
+
+
+def _simplify(node: Node, functions: dict) -> Node:
+    """Fold constants and apply algebraic identities to reduce bloat."""
+    if node.op in ("x", "c"):
+        return node
+    args = tuple(_simplify(a, functions) for a in node.args)
+    op = node.op
+    arity = len(args)
+
+    # constant folding
+    if all(a.op == "c" for a in args):
+        try:
+            with np.errstate(all="ignore"):
+                return Node("c", val=_fold(Node(op, args=args), functions))
+        except (OverflowError, FloatingPointError, ValueError, ZeroDivisionError):
+            pass
+
+    if arity == 1:
+        a = args[0]
+        if op == "neg" and a.op == "neg":
+            return a.args[0]
+        if op == "exp" and a.op == "log":
+            return a.args[0]
+        if op == "log" and a.op == "exp":
+            return a.args[0]
+        return Node(op, args=args)
+
+    if arity == 2:
+        a, b = args
+        if op == "+":
+            if a.op == "c" and a.val == 0.0:
+                return b
+            if b.op == "c" and b.val == 0.0:
+                return a
+        elif op == "-":
+            if b.op == "c" and b.val == 0.0:
+                return a
+            if _same(a, b):
+                return Node("c", val=0.0)
+        elif op == "*":
+            if (a.op == "c" and a.val == 0.0) or (b.op == "c" and b.val == 0.0):
+                return Node("c", val=0.0)
+            if a.op == "c" and a.val == 1.0:
+                return b
+            if b.op == "c" and b.val == 1.0:
+                return a
+        elif op == "/":
+            if b.op == "c" and b.val == 1.0:
+                return a
+            if a.op == "c" and a.val == 0.0:
+                return Node("c", val=0.0)
+            if _same(a, b):
+                return Node("c", val=1.0)
+        return Node(op, args=args)
+
+    return Node(op, args=args)
+
+
+def _simplify_fixpoint(node: Node, functions: dict, max_iter: int = 6) -> Node:
+    """Apply ``_simplify`` repeatedly until the tree stops shrinking."""
+    for _ in range(max_iter):
+        simplified = _simplify(node, functions)
+        if _size(simplified) >= _size(node):
+            return node
+        node = simplified
+    return node
+
+
 class SymbolicRegressor:
     """Evolves a symbolic expression ``x -> fitness`` via genetic programming."""
 
@@ -162,7 +250,13 @@ class SymbolicRegressor:
         self.seed = seed
         self.const_range = const_range
         self.refine = refine
-        self._functions = dict(_DEFAULT_FUNCTIONS, **(functions or {}))
+        self._functions = dict(_DEFAULT_FUNCTIONS)
+        if functions:
+            for name, spec in functions.items():
+                if spec is None:  # allow removing a base operator
+                    self._functions.pop(name, None)
+                else:
+                    self._functions[name] = spec
         self.best_: Node | None = None
         self.best_rmse_: float = inf
 
@@ -198,8 +292,9 @@ class SymbolicRegressor:
             if fits[gi] < best_fit:
                 best, best_fit = pop[gi], float(fits[gi])
 
-        self.best_ = best
-        self.best_rmse_ = float(max(best_fit - self.parsimony * _size(best), 0.0))
+        self.best_ = _simplify_fixpoint(best, self._functions)
+        pred = np.clip(_eval(self.best_, X, self._functions), -1e12, 1e12)
+        self.best_rmse_ = float(np.sqrt(np.mean((pred - y) ** 2)))
         if self.refine:
             self.refine_constants(X, y)
         return self
@@ -239,10 +334,18 @@ class SymbolicRegressor:
 
         from scipy.optimize import least_squares
 
-        result = least_squares(residual, init, method="lm", max_nfev=200)
-        for c, v in zip(constants, result.x):
+        rng = np.random.default_rng(0)
+        best_params, best_err = init, float(np.sqrt(np.mean(residual(init) ** 2)))
+        for restart in range(3):
+            init_try = init if restart == 0 else init + rng.normal(0.0, 0.5, size=init.shape)
+            result = least_squares(residual, init_try, method="lm", max_nfev=300)
+            err = float(np.sqrt(np.mean(residual(result.x) ** 2)))
+            if err < best_err:
+                best_err, best_params = err, result.x
+
+        for c, v in zip(constants, best_params):
             c.val = float(v)
-        self.best_rmse_ = float(np.sqrt(np.mean(residual(result.x) ** 2)))
+        self.best_rmse_ = best_err
         return self
 
     def predict(self, X: np.ndarray) -> np.ndarray:
