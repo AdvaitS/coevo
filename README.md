@@ -1,0 +1,152 @@
+# coevo
+
+**Surrogate-assisted & coevolutionary evolutionary computation for expensive black-box problems.**
+
+`coevo` is a small, dependency-light research library of evolutionary algorithms
+(GA, DE, PSO) whose distinctive feature is a family of *surrogate-assisted*
+strategies that learn to predict fitness — so the optimizer can spend its
+evaluation budget where it matters, not on every candidate in every generation.
+
+The idea is rooted in the coevolved fitness predictors of Schmidt & Lipson
+([*"Coevolution of Fitness Predictors"*, IEEE TEVC 2008](https://ieeexplore.ieee.org/document/4475399)):
+instead of approximating the whole fitness landscape, a predictor *co-evolves*
+with the population and specializes to the region it is currently exploring.
+
+## Why surrogate-assisted evolution?
+
+Most evolutionary-algorithm libraries assume fitness is cheap — evaluate everyone,
+every generation. But in the problems that matter (a wet-lab simulation, a
+protein-fitness oracle, a full model-training run), **the fitness evaluation *is*
+the bottleneck**. `coevo` replaces most of those expensive evaluations with cheap
+predictions, re-fitting a predictor that tracks the population as it moves.
+
+## Install
+
+```bash
+pip install -e ".[dev]"   # from a local checkout
+```
+
+Requires only `numpy` and `scipy` (Python ≥ 3.10).
+
+## Quickstart
+
+```python
+from coevo import (
+    CoevolvedPredictor,
+    DifferentialEvolution,
+    NearestNeighborSurrogate,
+    ParticleSwarmOptimization,
+    SurrogateEvaluator,
+    benchmarks,
+)
+
+# Exact evaluation (the classic way).
+problem = benchmarks.rastrigin(dim=10)
+result = DifferentialEvolution(pop_size=50, generations=300).optimize(problem)
+print(result.summary())          # rastrigin: best=... | gap-to-optimum ... | true_evals=...
+
+# Surrogate-assisted: predict fitness, truly evaluate only the most promising.
+sa = SurrogateEvaluator(
+    benchmarks.rastrigin(dim=10),
+    CoevolvedPredictor(NearestNeighborSurrogate()),
+    eval_fraction=0.25,
+)
+sa_result = DifferentialEvolution(pop_size=50, generations=300).optimize(
+    benchmarks.rastrigin(dim=10), sa
+)
+print(sa_result.summary())       # far fewer true_evals, comparable best
+```
+
+## What's inside
+
+| Component | Description |
+|---|---|
+| `DifferentialEvolution` | DE/rand/1/bin with synchronous (batch) updates |
+| `GeneticAlgorithm` | real-coded GA: tournament selection, arithmetic crossover, Gaussian mutation, elitism |
+| `ParticleSwarmOptimization` | canonical PSO with Clerc constriction coefficients |
+| `TrueEvaluator` | exact objective evaluation, counts `n_true` |
+| `SurrogateEvaluator` | pre-selection: predict the batch, truly evaluate only the promising `eval_fraction`, retrain the predictor on the true-eval archive |
+| `NearestNeighborSurrogate` | dependency-free 1-NN baseline predictor |
+| `RBFSurrogate` | thin-plate RBF interpolator (scipy) |
+| `CoevolvedPredictor` | wraps a surrogate and records how well it tracks the population (`error_trace`) |
+| `benchmarks` | sphere, rastrigin, rosenbrock, ackley, griewank, shifted/noisy variants |
+
+## Benchmarks
+
+Run the reproducible benchmark (median over seeds):
+
+```bash
+python benchmarks/run_benchmark.py --generations 200 --seeds 3
+```
+
+Sample output (`pop_size=50`, `generations=200`, `seeds=3`):
+
+| algorithm | problem | evaluator | best fitness (median) | true evals |
+|---|---|---|---|---|
+| DE | sphere(5) | exact | 4.841e-09 | 10050 |
+| DE | sphere(5) | surrogate (1-NN) | 4.182e-07 | 2798 |
+| DE | sphere(5) | surrogate (RBF) | 0.001417 | 2798 |
+| GA | sphere(5) | exact | 5.438e-07 | 9850 |
+| GA | sphere(5) | surrogate (1-NN) | 4.233e-08 | 2794 |
+| GA | sphere(5) | surrogate (RBF) | 0.4959 | 2794 |
+| PSO | sphere(5) | exact | 1.021e-15 | 10050 |
+| PSO | sphere(5) | surrogate (1-NN) | 2.521e-16 | 2798 |
+| PSO | sphere(5) | surrogate (RBF) | 2.384e-05 | 2798 |
+| DE | ackley(5) | exact | 0.0007715 | 10050 |
+| DE | ackley(5) | surrogate (1-NN) | 0.01304 | 2798 |
+| DE | ackley(5) | surrogate (RBF) | 0.00149 | 2798 |
+| GA | ackley(5) | exact | 8.535 | 9850 |
+| GA | ackley(5) | surrogate (1-NN) | 8.535 | 2794 |
+| GA | ackley(5) | surrogate (RBF) | 9.296 | 2794 |
+| PSO | ackley(5) | exact | 4.853e-07 | 10050 |
+| PSO | ackley(5) | surrogate (1-NN) | 4.449e-07 | 2798 |
+| PSO | ackley(5) | surrogate (RBF) | 2.857e-07 | 2798 |
+| DE | noisy_ackley(5) | exact | 0.04113 | 10050 |
+| DE | noisy_ackley(5) | surrogate (1-NN) | 0.2225 | 2798 |
+| DE | noisy_ackley(5) | surrogate (RBF) | 0.2567 | 2798 |
+| GA | noisy_ackley(5) | exact | 10.72 | 9850 |
+| GA | noisy_ackley(5) | surrogate (1-NN) | 10.84 | 2794 |
+| GA | noisy_ackley(5) | surrogate (RBF) | 12.35 | 2794 |
+| PSO | noisy_ackley(5) | exact | 0.008059 | 10050 |
+| PSO | noisy_ackley(5) | surrogate (1-NN) | 0.1755 | 2798 |
+| PSO | noisy_ackley(5) | surrogate (RBF) | 0.1853 | 2798 |
+
+### What this shows
+
+1. **Surrogate-assisted runs spend ~72% fewer true evaluations** — the whole
+   point: on expensive objectives, that is a ~3.5× cost saving.
+2. **The bounded 1-NN predictor is a robust baseline** — on smooth functions it
+   matches (and sometimes beats) exact evaluation while using a fraction of the
+   budget.
+3. **Unbounded surrogates can be *exploited*** — the thin-plate RBF extrapolates
+   wildly outside its training data, and an aggressive optimizer (the GA here)
+   can chase the surrogate's imaginary minima (`best=0.49` instead of `5e-7`).
+   This is a well-known failure mode of surrogate-assisted evolution and the
+   motivation for *model management* (see roadmap).
+4. **Noisy objectives are harder** — surrogates still save evaluations, but noise
+   degrades their predictions, so exact evaluation retains an edge in final
+   fitness.
+
+These caveats are the interesting part: `coevo` is built to make them easy to
+*measure and study*, not to hide them.
+
+## Roadmap
+
+- Gaussian-process and random-forest surrogates (sklearn-backed).
+- Model management: individual-based, generation-based, and trust-region strategies.
+- Multi-objective SAEA (NSGA-II + surrogates) for the accuracy↔cost frontier.
+- Evolutionary fitness predictors (evolving the *predictor* itself, Schmidt & Lipson style).
+- Real expensive applications: neural-architecture search and protein-fitness oracles.
+
+## Design principles
+
+- **Minimal dependencies** — `numpy` + `scipy` only; no ML framework required.
+- **Batch-first** — algorithms evaluate whole generations at once, which is what
+  makes surrogate pre-selection natural.
+- **Reproducible** — every algorithm and problem takes an explicit `seed`.
+- **Research-log friendly** — results expose `history`, `true_evaluations`, and
+  predictor diagnostics for plotting in `docs/research/`.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
