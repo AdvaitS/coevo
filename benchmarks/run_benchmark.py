@@ -25,12 +25,15 @@ from coevo import (
     DifferentialEvolution,
     GeneticAlgorithm,
     NearestNeighborSurrogate,
+    NSGA2,
     ParticleSwarmOptimization,
     RBFSurrogate,
     SurrogateEvaluator,
+    SurrogateMultiObjectiveEvaluator,
     TrueEvaluator,
     benchmarks,
 )
+from coevo.core.metrics import igd
 
 ALGORITHMS = {
     "DE": DifferentialEvolution,
@@ -82,12 +85,53 @@ def _median_best_at_budget(algo_cls, make_problem, seeds, budget, surrogate):
     return median(bests), int(median(evals))
 
 
+def _run_mo_benchmark(generations: int, seeds: int) -> None:
+    problems = [
+        ("zdt1", benchmarks.zdt1, benchmarks.zdt1_front),
+        ("zdt2", benchmarks.zdt2, benchmarks.zdt2_front),
+        ("zdt3", benchmarks.zdt3, benchmarks.zdt3_front),
+    ]
+    surrogates = [
+        ("exact", None),
+        ("surrogate (1-NN)", lambda: CoevolvedPredictor(NearestNeighborSurrogate())),
+        ("surrogate (RBF, clipped)", lambda: CoevolvedPredictor(ClippedPredictor(RBFSurrogate()))),
+    ]
+    print(f"# coevo multi-objective benchmark (generations={generations}, seeds={seeds})")
+    print()
+    print("| problem | evaluator | IGD (median) | true evals |")
+    print("|---|---|---|---|")
+    for name, make, make_front in problems:
+        ref = make_front()
+        for label, factory in surrogates:
+            igds, evals = [], []
+            for seed in range(seeds):
+                problem = make(dim=10)
+                evaluator = (
+                    SurrogateMultiObjectiveEvaluator(
+                        problem, factory, eval_fraction=0.3, warmup=5
+                    )
+                    if factory is not None
+                    else None
+                )
+                result = NSGA2(pop_size=100, generations=generations, seed=seed).optimize(
+                    problem, evaluator
+                )
+                igds.append(igd(result.objectives, ref))
+                evals.append(result.true_evaluations)
+            print(f"| {name} | {label} | {median(igds):.4g} | {int(median(evals))} |")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--generations", type=int, default=200)
     parser.add_argument("--seeds", type=int, default=3)
     parser.add_argument("--budget", type=int, default=None)
+    parser.add_argument("--mo", action="store_true", help="run the multi-objective benchmark")
     args = parser.parse_args()
+
+    if args.mo:
+        _run_mo_benchmark(args.generations, args.seeds)
+        return
 
     seeds = list(range(args.seeds))
     problems = [

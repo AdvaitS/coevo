@@ -64,8 +64,12 @@ print(sa_result.summary())       # far fewer true_evals, comparable best
 | `DifferentialEvolution` | DE/rand/1/bin with synchronous (batch) updates and budget limiting |
 | `GeneticAlgorithm` | real-coded GA: tournament selection, arithmetic crossover, Gaussian mutation, elitism |
 | `ParticleSwarmOptimization` | canonical PSO with Clerc constriction coefficients |
+| `NSGA2` | non-dominated sorting GA-II (SBX + polynomial mutation) for multi-objective problems |
 | `TrueEvaluator` | exact objective evaluation, counts `n_true` |
 | `SurrogateEvaluator` | model management: `individual` (pre-selection) or `generation` strategies; retrains a coevolved predictor on the true-eval archive |
+| `SurrogateMultiObjectiveEvaluator` | surrogate-assisted pre-selection for multi-objective problems (one surrogate per objective) |
+| `MultiObjectiveProblem` / `MultiObjectiveResult` | multi-objective problem/result types with Pareto-front reporting |
+| `metrics` | `nondominated_mask`, `fast_non_dominated_sort`, `crowding_distance`, `igd`, `hypervolume` |
 | `NearestNeighborSurrogate` | dependency-free 1-NN baseline predictor (bounded) |
 | `RBFSurrogate` | thin-plate RBF interpolator (scipy) |
 | `GaussianProcessSurrogate` | GP regression (scikit-learn, optional) |
@@ -157,9 +161,27 @@ than exact evaluation at the *same* true-evaluation cost.
 These caveats are the interesting part: `coevo` is built to make them easy to
 *measure and study*, not to hide them.
 
+## Multi-objective optimization
+
+`NSGA2` (SBX + polynomial mutation) optimizes multi-objective problems, and
+`SurrogateMultiObjectiveEvaluator` applies the same surrogate-assisted
+pre-selection (one predictor per objective). Run the MO benchmark with
+`python benchmarks/run_benchmark.py --mo`:
+
+| problem | evaluator | IGD (median) | true evals |
+|---|---|---|---|
+| zdt1 | exact | 0.0051 | 25100 |
+| zdt1 | surrogate (1-NN) | 0.0057 | 7880 |
+| zdt2 | exact | 0.0049 | 25100 |
+| zdt2 | surrogate (1-NN) | 0.0053 | 7880 |
+| zdt3 | exact | 0.19 | 25100 |
+| zdt3 | surrogate (1-NN) | 0.19 | 7880 |
+
+The bounded 1-NN surrogate matches exact IGD on ZDT1/ZDT2 while spending ~69%
+fewer true evaluations — the same surrogate-assisted story, on Pareto fronts.
+
 ## Roadmap
 
-- Multi-objective SAEA (NSGA-II + surrogates) for the accuracy↔cost frontier.
 - Trust-region and uncertainty-aware model management (GP variance).
 - Incremental predictor coevolution — evolve the predictor *population* continuously (rather than re-evolving from scratch each generation).
 - Real expensive applications: neural-architecture search and protein-fitness oracles.

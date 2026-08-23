@@ -11,10 +11,21 @@ from coevo import benchmarks
 from coevo.algorithms import (
     DifferentialEvolution,
     GeneticAlgorithm,
+    NSGA2,
     ParticleSwarmOptimization,
 )
-from coevo.core import OptimizationResult, Problem
-from coevo.evaluation import SurrogateEvaluator, TrueEvaluator
+from coevo.core import (
+    MultiObjectiveProblem,
+    MultiObjectiveResult,
+    OptimizationResult,
+    Problem,
+)
+from coevo.evaluation import (
+    SurrogateEvaluator,
+    SurrogateMultiObjectiveEvaluator,
+    TrueEvaluator,
+    TrueMultiObjectiveEvaluator,
+)
 from coevo.surrogates import (
     ClippedPredictor,
     CoevolvedPredictor,
@@ -26,16 +37,21 @@ from coevo.surrogates import (
     SymbolicRegressor,
 )
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 __all__ = [
     "Problem",
     "OptimizationResult",
+    "MultiObjectiveProblem",
+    "MultiObjectiveResult",
     "DifferentialEvolution",
     "GeneticAlgorithm",
     "ParticleSwarmOptimization",
+    "NSGA2",
     "TrueEvaluator",
     "SurrogateEvaluator",
+    "TrueMultiObjectiveEvaluator",
+    "SurrogateMultiObjectiveEvaluator",
     "NearestNeighborSurrogate",
     "RBFSurrogate",
     "GaussianProcessSurrogate",
