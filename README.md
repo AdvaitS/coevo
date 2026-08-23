@@ -72,6 +72,7 @@ print(sa_result.summary())       # far fewer true_evals, comparable best
 | `RandomForestSurrogate` | RF regression (scikit-learn, optional) |
 | `ClippedPredictor` | bounds any surrogate's predictions to the observed fitness range |
 | `CoevolvedPredictor` | wraps a surrogate and records how well it tracks the population (`error_trace`) |
+| `SymbolicRegressor` / `EvolvedPredictor` | evolves a compact, *interpretable* fitness-prediction expression via genetic programming (Schmidt & Lipson, 2008) |
 | `benchmarks` | sphere, rastrigin, rosenbrock, ackley, griewank, shifted/noisy variants |
 
 ## Benchmarks
@@ -160,7 +161,7 @@ These caveats are the interesting part: `coevo` is built to make them easy to
 
 - Multi-objective SAEA (NSGA-II + surrogates) for the accuracy↔cost frontier.
 - Trust-region and uncertainty-aware model management (GP variance).
-- Evolutionary fitness predictors (evolving the *predictor* itself, Schmidt & Lipson style).
+- Incremental predictor coevolution — evolve the predictor *population* continuously (rather than re-evolving from scratch each generation).
 - Real expensive applications: neural-architecture search and protein-fitness oracles.
 
 ## Design principles

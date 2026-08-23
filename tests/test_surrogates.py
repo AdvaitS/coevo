@@ -6,10 +6,12 @@ import pytest
 from coevo import (
     ClippedPredictor,
     CoevolvedPredictor,
+    EvolvedPredictor,
     GaussianProcessSurrogate,
     NearestNeighborSurrogate,
     RBFSurrogate,
     RandomForestSurrogate,
+    SymbolicRegressor,
 )
 
 
@@ -77,3 +79,28 @@ def test_random_forest_surrogate():
     pred = sur.predict(X)
     assert pred.shape == y.shape
     assert np.all(np.isfinite(pred))
+
+
+def test_symbolic_regressor_beats_mean_baseline():
+    rng = np.random.default_rng(0)
+    X = rng.uniform(-2, 2, size=(60, 3))
+    y = 2.0 * X[:, 0] - 1.5 * X[:, 1] + X[:, 2] ** 2
+
+    reg = SymbolicRegressor(population_size=200, generations=30, seed=0).fit(X, y)
+    pred = reg.predict(X)
+    gp_rmse = float(np.sqrt(np.mean((pred - y) ** 2)))
+    mean_rmse = float(np.sqrt(np.mean((np.full_like(y, y.mean()) - y) ** 2)))
+
+    assert np.all(np.isfinite(pred))
+    assert gp_rmse < mean_rmse
+    assert "x" in reg.expression()
+
+
+def test_evolved_predictor_tracks_error_and_expression():
+    X, y = _data()
+    pred = EvolvedPredictor(population_size=120, generations=15, seed=1)
+    pred.fit(X, y)
+    pred.fit(X[:10], y[:10])
+    assert len(pred.error_trace) == 2
+    assert isinstance(pred.expression, str)
+    assert np.all(np.isfinite(pred.predict(X)))

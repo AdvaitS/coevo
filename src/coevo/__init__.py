@@ -18,13 +18,15 @@ from coevo.evaluation import SurrogateEvaluator, TrueEvaluator
 from coevo.surrogates import (
     ClippedPredictor,
     CoevolvedPredictor,
+    EvolvedPredictor,
     GaussianProcessSurrogate,
     NearestNeighborSurrogate,
     RBFSurrogate,
     RandomForestSurrogate,
+    SymbolicRegressor,
 )
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 __all__ = [
     "Problem",
@@ -40,5 +42,7 @@ __all__ = [
     "RandomForestSurrogate",
     "ClippedPredictor",
     "CoevolvedPredictor",
+    "SymbolicRegressor",
+    "EvolvedPredictor",
     "benchmarks",
 ]
