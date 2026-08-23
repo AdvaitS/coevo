@@ -200,6 +200,11 @@ class SymbolicRegressor:
             raise RuntimeError("SymbolicRegressor must be fitted before expression().")
         return _to_str(self.best_, self._functions)
 
+    @property
+    def complexity(self) -> int:
+        """Number of nodes in the evolved expression (0 if not fitted)."""
+        return _size(self.best_) if self.best_ is not None else 0
+
 
 def _tournament(rng: np.random.Generator, fits: np.ndarray, k: int) -> int:
     idx = rng.choice(len(fits), k, replace=False)
