@@ -72,6 +72,14 @@ def _collect(node: Node, acc: list[Node]) -> None:
         _collect(a, acc)
 
 
+def _collect_constants(node: Node, acc: list[Node]) -> None:
+    if node.op == "c":
+        acc.append(node)
+        return
+    for a in node.args:
+        _collect_constants(a, acc)
+
+
 def _replace(node: Node, target: Node, replacement: Node) -> Node:
     if node is target:
         return replacement
@@ -140,6 +148,7 @@ class SymbolicRegressor:
         seed: int = 0,
         functions: dict[str, tuple[Callable, int, Callable[[list[str]], str]]] | None = None,
         const_range: tuple[float, float] = (-1.0, 1.0),
+        refine: bool = True,
     ) -> None:
         self.population_size = population_size
         self.generations = generations
@@ -151,6 +160,7 @@ class SymbolicRegressor:
         self.parsimony = parsimony
         self.seed = seed
         self.const_range = const_range
+        self.refine = refine
         self._functions = dict(_DEFAULT_FUNCTIONS, **(functions or {}))
         self.best_: Node | None = None
         self.best_rmse_: float = inf
@@ -189,6 +199,49 @@ class SymbolicRegressor:
 
         self.best_ = best
         self.best_rmse_ = float(np.sqrt(max(best_fit - self.parsimony * _size(best), 0.0)))
+        if self.refine:
+            self.refine_constants(X, y)
+        return self
+
+    def refine_constants(self, X: np.ndarray, y: np.ndarray) -> "SymbolicRegressor":
+        """Refit the evolved expression's constants by nonlinear least squares.
+
+        Genetic programming finds the *structure* of a model quickly but its
+        ephemeral constants are imprecise; a least-squares pass over just the
+        constants recovers accurate parameters.
+        """
+        if self.best_ is None:
+            return self
+        constants: list[Node] = []
+        _collect_constants(self.best_, constants)
+        if not constants:
+            return self
+
+        X = np.atleast_2d(X)
+        y = np.asarray(y, dtype=float).ravel()
+        functions = self._functions
+        init = np.array([c.val for c in constants], dtype=float)
+
+        def _eval_params(node: Node, p: np.ndarray, counter: list[int]) -> np.ndarray:
+            if node.op == "x":
+                return X[:, node.idx]
+            if node.op == "c":
+                v = p[counter[0]]
+                counter[0] += 1
+                return np.full(X.shape[0], v)
+            fn = functions[node.op][0]
+            return fn(*(_eval_params(a, p, counter) for a in node.args))
+
+        def residual(p: np.ndarray) -> np.ndarray:
+            pred = _eval_params(self.best_, p, [0])
+            return np.clip(pred, -1e6, 1e6) - y
+
+        from scipy.optimize import least_squares
+
+        result = least_squares(residual, init, method="lm", max_nfev=200)
+        for c, v in zip(constants, result.x):
+            c.val = float(v)
+        self.best_rmse_ = float(np.sqrt(np.mean(residual(result.x) ** 2)))
         return self
 
     def predict(self, X: np.ndarray) -> np.ndarray:
