@@ -139,6 +139,7 @@ class SymbolicRegressor:
         parsimony: float = 0.01,
         seed: int = 0,
         functions: dict[str, tuple[Callable, int, Callable[[list[str]], str]]] | None = None,
+        const_range: tuple[float, float] = (-1.0, 1.0),
     ) -> None:
         self.population_size = population_size
         self.generations = generations
@@ -149,6 +150,7 @@ class SymbolicRegressor:
         self.mutation_p = mutation_p
         self.parsimony = parsimony
         self.seed = seed
+        self.const_range = const_range
         self._functions = dict(_DEFAULT_FUNCTIONS, **(functions or {}))
         self.best_: Node | None = None
         self.best_rmse_: float = inf
@@ -160,7 +162,7 @@ class SymbolicRegressor:
         dim = X.shape[1]
 
         pop = [
-            _random_node(rng, dim, 0, self.max_depth, (-1.0, 1.0), self._functions)
+            _random_node(rng, dim, 0, self.max_depth, self.const_range, self._functions)
             for _ in range(self.population_size)
         ]
         fits = np.array([_fitness(t, X, y, self.parsimony, self._functions) for t in pop])
@@ -176,8 +178,8 @@ class SymbolicRegressor:
                     c1, c2 = _crossover(rng, p1, p2)
                 else:
                     c1, c2 = p1, p2
-                c1 = _mutate(rng, c1, dim, self.max_depth, self.max_size, self._functions) if rng.random() < self.mutation_p else c1
-                c2 = _mutate(rng, c2, dim, self.max_depth, self.max_size, self._functions) if rng.random() < self.mutation_p else c2
+                c1 = _mutate(rng, c1, dim, self.max_depth, self.max_size, self._functions, self.const_range) if rng.random() < self.mutation_p else c1
+                c2 = _mutate(rng, c2, dim, self.max_depth, self.max_size, self._functions, self.const_range) if rng.random() < self.mutation_p else c2
                 new_pop.extend((c1, c2))
             pop = new_pop[: self.population_size]
             fits = np.array([_fitness(t, X, y, self.parsimony, self._functions) for t in pop])
@@ -222,12 +224,18 @@ def _crossover(rng: np.random.Generator, p1: Node, p2: Node) -> tuple[Node, Node
 
 
 def _mutate(
-    rng: np.random.Generator, tree: Node, dim: int, max_depth: int, max_size: int, functions: dict
+    rng: np.random.Generator,
+    tree: Node,
+    dim: int,
+    max_depth: int,
+    max_size: int,
+    functions: dict,
+    const_range: tuple[float, float],
 ) -> Node:
     nodes: list[Node] = []
     _collect(tree, nodes)
     sub = nodes[int(rng.integers(len(nodes)))]
-    new_tree = _replace(tree, sub, _random_node(rng, dim, 0, max_depth, (-1.0, 1.0), functions))
+    new_tree = _replace(tree, sub, _random_node(rng, dim, 0, max_depth, const_range, functions))
     return new_tree if _size(new_tree) <= max_size else tree
 
 
