@@ -59,7 +59,8 @@ def _eval(node: Node, X: np.ndarray, functions: dict) -> np.ndarray:
         return np.full(X.shape[0], node.val)
     fn = functions[op][0]
     args = tuple(_eval(a, X, functions) for a in node.args)
-    return fn(*args)
+    with np.errstate(all="ignore"):
+        return fn(*args)
 
 
 def _size(node: Node) -> int:
