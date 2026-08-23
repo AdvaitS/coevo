@@ -24,8 +24,9 @@ class GeneticAlgorithm(BaseAlgorithm):
         tournament_size: int = 3,
         elite: int = 1,
         seed: int = 0,
+        max_evaluations: int | None = None,
     ) -> None:
-        super().__init__(pop_size, generations, seed)
+        super().__init__(pop_size, generations, seed, max_evaluations)
         self.crossover_p = crossover_p
         self.mutation_p = mutation_p
         self.mutation_sigma = mutation_sigma
@@ -55,6 +56,8 @@ class GeneticAlgorithm(BaseAlgorithm):
         history = [float(np.min(fitness))]
 
         for _ in range(self.generations):
+            if self.max_evaluations is not None and evaluator.n_true >= self.max_evaluations:
+                break
             n_parents = max(1, n - self.elite)
             parents = self._tournament(rng, pop, fitness, n_parents)
 

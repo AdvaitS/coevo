@@ -18,10 +18,17 @@ class BaseAlgorithm(ABC):
     :class:`~coevo.core.result.OptimizationResult`.
     """
 
-    def __init__(self, pop_size: int = 50, generations: int = 100, seed: int = 0) -> None:
+    def __init__(
+        self,
+        pop_size: int = 50,
+        generations: int = 100,
+        seed: int = 0,
+        max_evaluations: int | None = None,
+    ) -> None:
         self.pop_size = pop_size
         self.generations = generations
         self.seed = seed
+        self.max_evaluations = max_evaluations
 
     @abstractmethod
     def optimize(

@@ -66,6 +66,11 @@ class SurrogateEvaluator(Evaluator):
         points. Capping keeps surrogates fast and makes the predictor focus on
         the current population (rather than stale history) — the coevolutionary
         flavour of the method.
+    strategy:
+        Model-management strategy. ``"individual"`` (default) true-evaluates the
+        most promising ``eval_fraction`` of each batch (pre-selection);
+        ``"generation"`` alternates whole-true-evaluation generations with
+        surrogate-only generations (best candidate always truly re-evaluated).
     """
 
     def __init__(
@@ -76,13 +81,17 @@ class SurrogateEvaluator(Evaluator):
         warmup: int = 3,
         retrain_every: int = 1,
         archive_size: int | None = 200,
+        strategy: str = "individual",
     ) -> None:
+        if strategy not in ("individual", "generation"):
+            raise ValueError(f"Unknown strategy {strategy!r}; use 'individual' or 'generation'.")
         self.problem = problem
         self.surrogate = surrogate
         self.eval_fraction = eval_fraction
         self.warmup = warmup
         self.retrain_every = retrain_every
         self.archive_size = archive_size
+        self.strategy = strategy
         self._n_true = 0
         self._calls = 0
         self._X: list[np.ndarray] = []
@@ -128,6 +137,24 @@ class SurrogateEvaluator(Evaluator):
                 self.surrogate.fit(X, yt)
             return y
 
+        if self.strategy == "generation":
+            period = max(1, int(round(1.0 / self.eval_fraction)))
+            if (self._calls - self.warmup) % period == 0:
+                # True generation: evaluate the whole batch, then refresh the
+                # surrogate on the updated archive.
+                y = self._true_eval(x)
+                X, yt = self._archive()
+                self.surrogate.fit(X, yt)
+                return y
+            # Surrogate-only generation: predict, but always truly re-evaluate
+            # the single best candidate so the search cannot drift into
+            # surrogate minima.
+            y_hat = np.asarray(self.surrogate.predict(x), dtype=float).ravel()
+            best = int(np.argmin(y_hat))
+            y_hat[best] = self._true_eval(x[best : best + 1])[0]
+            return y_hat
+
+        # Default "individual" strategy: pre-selection.
         y_hat = np.asarray(self.surrogate.predict(x), dtype=float).ravel()
 
         n = len(x)

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "coevo"
-version = "0.1.0"
+version = "0.2.0"
 description = "Surrogate-assisted and coevolutionary evolutionary computation for expensive black-box problems"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -35,6 +35,10 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
   "pytest>=7",
+  "scikit-learn>=1.0",
+]
+sklearn = [
+  "scikit-learn>=1.0",
 ]
 
 [tool.hatch.build.targets.wheel]

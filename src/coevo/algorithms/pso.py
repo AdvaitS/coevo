@@ -25,8 +25,9 @@ class ParticleSwarmOptimization(BaseAlgorithm):
         c1: float = 1.49618,
         c2: float = 1.49618,
         seed: int = 0,
+        max_evaluations: int | None = None,
     ) -> None:
-        super().__init__(pop_size, generations, seed)
+        super().__init__(pop_size, generations, seed, max_evaluations)
         self.w = w
         self.c1 = c1
         self.c2 = c2
@@ -51,6 +52,8 @@ class ParticleSwarmOptimization(BaseAlgorithm):
         history = [gbest_f]
 
         for _ in range(self.generations):
+            if self.max_evaluations is not None and evaluator.n_true >= self.max_evaluations:
+                break
             r1 = rng.random((n, dim))
             r2 = rng.random((n, dim))
             vel = self.w * vel + self.c1 * r1 * (pbest - pos) + self.c2 * r2 * (gbest - pos)

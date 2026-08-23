@@ -25,8 +25,9 @@ class DifferentialEvolution(BaseAlgorithm):
         F: float = 0.8,
         CR: float = 0.9,
         seed: int = 0,
+        max_evaluations: int | None = None,
     ) -> None:
-        super().__init__(pop_size, generations, seed)
+        super().__init__(pop_size, generations, seed, max_evaluations)
         self.F = F
         self.CR = CR
 
@@ -56,6 +57,8 @@ class DifferentialEvolution(BaseAlgorithm):
         history = [best_f]
 
         for _ in range(self.generations):
+            if self.max_evaluations is not None and evaluator.n_true >= self.max_evaluations:
+                break
             a = self._distinct_indices(rng, n, 3)
             mutant = pop[a[0]] + self.F * (pop[a[1]] - pop[a[2]])
 

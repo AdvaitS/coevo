@@ -3,7 +3,14 @@
 import numpy as np
 import pytest
 
-from coevo import CoevolvedPredictor, NearestNeighborSurrogate, RBFSurrogate
+from coevo import (
+    ClippedPredictor,
+    CoevolvedPredictor,
+    GaussianProcessSurrogate,
+    NearestNeighborSurrogate,
+    RBFSurrogate,
+    RandomForestSurrogate,
+)
 
 
 def _data(n=30, d=3):
@@ -42,3 +49,31 @@ def test_coevolved_predictor_records_error_trace():
     pred.fit(X[:10], y[:10])
     assert len(pred.error_trace) == 2
     assert pred.error_trace[-1] < 1e-6  # exact on its own training set
+
+
+def test_clipped_predictor_bounds_predictions():
+    X, y = _data()
+    pred = ClippedPredictor(RBFSurrogate()).fit(X, y)
+    # Query far outside the training region; the RBF extrapolates wildly there,
+    # but the clipped predictor must stay within the observed fitness range.
+    Xq = np.random.default_rng(1).normal(size=(50, 3)) * 20
+    out = pred.predict(Xq)
+    assert out.min() >= y.min()
+    assert out.max() <= y.max()
+
+
+def test_gaussian_process_surrogate():
+    pytest.importorskip("sklearn")
+    X, y = _data()
+    sur = GaussianProcessSurrogate().fit(X, y)
+    pred = sur.predict(X)
+    np.testing.assert_allclose(pred, y, atol=0.05)
+
+
+def test_random_forest_surrogate():
+    pytest.importorskip("sklearn")
+    X, y = _data()
+    sur = RandomForestSurrogate(n_estimators=50).fit(X, y)
+    pred = sur.predict(X)
+    assert pred.shape == y.shape
+    assert np.all(np.isfinite(pred))

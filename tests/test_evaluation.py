@@ -1,10 +1,12 @@
 """Evaluator plumbing and the surrogate-assisted loop."""
 
 import numpy as np
+import pytest
 
 from coevo import (
     CoevolvedPredictor,
     DifferentialEvolution,
+    NearestNeighborSurrogate,
     RBFSurrogate,
     SurrogateEvaluator,
     TrueEvaluator,
@@ -36,7 +38,10 @@ def test_surrogate_assisted_de_converges():
     problem = benchmarks.sphere(5)
     algo = DifferentialEvolution(pop_size=30, generations=200, seed=2)
     ev = SurrogateEvaluator(
-        problem, CoevolvedPredictor(RBFSurrogate()), eval_fraction=0.3, warmup=5
+        problem,
+        CoevolvedPredictor(NearestNeighborSurrogate()),
+        eval_fraction=0.3,
+        warmup=5,
     )
     result = algo.optimize(problem, ev)
     assert result.best_fitness < 1e-6
@@ -52,3 +57,24 @@ def test_surrogate_evaluator_prediction_errors_exposed():
     for _ in range(6):
         ev(rng.normal(size=(20, 4)))
     assert len(ev.prediction_errors) >= 1
+
+
+def test_generation_strategy_reduces_evals_and_converges():
+    problem = benchmarks.sphere(5)
+    algo = DifferentialEvolution(pop_size=30, generations=100, seed=3)
+    ev = SurrogateEvaluator(
+        problem,
+        CoevolvedPredictor(NearestNeighborSurrogate()),
+        eval_fraction=0.2,
+        warmup=4,
+        strategy="generation",
+    )
+    result = algo.optimize(problem, ev)
+    assert result.true_evaluations < 30 + 30 * 100
+    assert result.best_fitness < 1e-2
+
+
+def test_invalid_strategy_raises():
+    problem = benchmarks.sphere(5)
+    with pytest.raises(ValueError, match="strategy"):
+        SurrogateEvaluator(problem, NearestNeighborSurrogate(), strategy="bogus")
