@@ -104,3 +104,93 @@ def test_evolved_predictor_tracks_error_and_expression():
     assert len(pred.error_trace) == 2
     assert isinstance(pred.expression, str)
     assert np.all(np.isfinite(pred.predict(X)))
+
+
+# --- GP engine correctness regressions -------------------------------------
+
+
+def test_symbolic_regressor_treats_1d_x_as_one_feature():
+    """A 1-D X is n samples of one feature, not one sample of n features.
+
+    np.atleast_2d would reshape (n,) to (1, n), silently fitting a model over n
+    imaginary features to a single data point.
+    """
+    from coevo.surrogates.evolved import SymbolicRegressor
+
+    x = np.linspace(0.0, 3.0, 40)
+    model = SymbolicRegressor(population_size=60, generations=8, seed=0).fit(x, 2.0 * x)
+    assert model.predict(x).shape == (40,)
+    # only feature x0 can appear; x1.. would mean the shape was misread
+    assert "x1" not in model.expression()
+
+
+def test_symbolic_regressor_rejects_length_mismatch():
+    from coevo.surrogates.evolved import SymbolicRegressor
+
+    with pytest.raises(ValueError, match="length mismatch"):
+        SymbolicRegressor(population_size=20, generations=2).fit(
+            np.zeros((10, 1)), np.zeros(9)
+        )
+
+
+def test_crossover_respects_max_size():
+    """Subtree crossover is the dominant bloat source; it must honour max_size."""
+    from coevo.surrogates.evolved import SymbolicRegressor, _size
+
+    rng = np.random.default_rng(0)
+    X = rng.uniform(0.0, 5.0, size=(80, 1))
+    y = X[:, 0] ** 1.5
+    for seed in range(6):
+        model = SymbolicRegressor(
+            population_size=150,
+            generations=25,
+            seed=seed,
+            parsimony=0.0,  # no size pressure: only the hard bound applies
+            max_size=20,
+            refine=False,
+        ).fit(X, y)
+        assert _size(model.best_) <= 20, f"seed {seed}: {_size(model.best_)} nodes > max_size"
+
+
+def test_simplify_preserves_protected_operator_semantics():
+    """exp(log(x)) is not x for the protected log, so the rewrite must not fire."""
+    from coevo.surrogates.evolved import (
+        _DEFAULT_FUNCTIONS,
+        Node,
+        _eval,
+        _simplify_fixpoint,
+    )
+
+    tree = Node("exp", args=(Node("log", args=(Node("x", idx=0),)),))
+    X = np.array([[-3.0], [0.0], [2.0]])
+    before = _eval(tree, X, _DEFAULT_FUNCTIONS)
+    after = _eval(_simplify_fixpoint(tree, _DEFAULT_FUNCTIONS), X, _DEFAULT_FUNCTIONS)
+    np.testing.assert_allclose(before, after)
+
+
+def test_reported_rmse_matches_predict():
+    """best_rmse_ must describe the model that predict() actually evaluates."""
+    from coevo.surrogates.evolved import SymbolicRegressor
+
+    rng = np.random.default_rng(1)
+    X = rng.uniform(-2.0, 2.0, size=(60, 1))
+    y = np.sin(X[:, 0]) + 0.05 * rng.normal(size=60)
+    for seed in range(8):
+        model = SymbolicRegressor(population_size=100, generations=12, seed=seed).fit(X, y)
+        actual = float(np.sqrt(np.mean((model.predict(X) - y) ** 2)))
+        assert actual == pytest.approx(model.best_rmse_, rel=1e-6, abs=1e-9)
+
+
+def test_refine_constants_survives_more_params_than_points():
+    """Levenberg-Marquardt needs n_residuals >= n_params; refinement must not raise."""
+    from coevo.surrogates.evolved import Node, SymbolicRegressor
+
+    model = SymbolicRegressor(population_size=10, generations=1, seed=0)
+    model.best_ = Node(
+        "+",
+        args=(
+            Node("+", args=(Node("c", val=1.0), Node("c", val=2.0))),
+            Node("+", args=(Node("c", val=3.0), Node("x", idx=0))),
+        ),
+    )
+    model.refine_constants(np.array([[0.0], [1.0]]), np.array([0.5, 1.5]))  # 3 consts, 2 points
