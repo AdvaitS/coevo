@@ -46,6 +46,9 @@ class ParticleSwarmOptimization(BaseAlgorithm):
 
         pbest = pos.copy()
         pbest_f = fit.copy()
+        # Personal bests persist for the whole run, so a predicted value stored
+        # here is never revisited unless it is explicitly verified.
+        pbest_is_true = evaluator.true_mask(n).copy()
         gbest_idx = int(np.argmin(pbest_f))
         gbest = pbest[gbest_idx].copy()
         gbest_f = float(pbest_f[gbest_idx])
@@ -59,12 +62,22 @@ class ParticleSwarmOptimization(BaseAlgorithm):
             vel = self.w * vel + self.c1 * r1 * (pbest - pos) + self.c2 * r2 * (gbest - pos)
             pos = np.clip(pos + vel, lo, hi)
             fit = evaluator(pos)
+            fit_is_true = evaluator.true_mask(n)
 
             improved = fit < pbest_f
             pbest[improved] = pos[improved]
             pbest_f[improved] = fit[improved]
+            pbest_is_true[improved] = fit_is_true[improved]
 
             gbest_idx = int(np.argmin(pbest_f))
+            # Verify the swarm best before adopting it, so the reported global
+            # best cannot be a surrogate artefact.
+            if not pbest_is_true[gbest_idx]:
+                pbest_f[gbest_idx] = float(
+                    np.asarray(evaluator.evaluate_true(pbest[gbest_idx : gbest_idx + 1])).ravel()[0]
+                )
+                pbest_is_true[gbest_idx] = True
+                gbest_idx = int(np.argmin(pbest_f))
             if pbest_f[gbest_idx] < gbest_f:
                 gbest_f = float(pbest_f[gbest_idx])
                 gbest = pbest[gbest_idx].copy()

@@ -13,6 +13,13 @@ from coevo.core.problem import Problem
 class Evaluator(ABC):
     """Provides fitness values for a batch of candidate solutions."""
 
+    #: Boolean mask over the most recent batch: True where the returned fitness
+    #: came from the true objective rather than a surrogate prediction. An
+    #: optimizer that carries fitness across generations needs this, otherwise
+    #: an over-optimistic prediction is never revisited and occupies the
+    #: population for the rest of the run.
+    last_true_mask: np.ndarray | None = None
+
     @property
     @abstractmethod
     def n_true(self) -> int:
@@ -21,6 +28,17 @@ class Evaluator(ABC):
     @abstractmethod
     def __call__(self, x: np.ndarray) -> np.ndarray:
         """Return fitness for a batch ``x`` of shape ``(n, dim)``."""
+
+    def true_mask(self, n: int) -> np.ndarray:
+        """Mask for the last batch, defaulting to all-true for exact evaluators."""
+        mask = self.last_true_mask
+        if mask is None or len(mask) != n:
+            return np.ones(n, dtype=bool)
+        return mask
+
+    def evaluate_true(self, x: np.ndarray) -> np.ndarray:
+        """Force a true evaluation of ``x``, bypassing any surrogate."""
+        return self(x)
 
 
 class TrueEvaluator(Evaluator):
@@ -37,6 +55,7 @@ class TrueEvaluator(Evaluator):
     def __call__(self, x: np.ndarray) -> np.ndarray:
         x = np.atleast_2d(x)
         self._n_true += len(x)
+        self.last_true_mask = np.ones(len(x), dtype=bool)
         return self.problem.evaluate(x)
 
 
@@ -123,6 +142,13 @@ class SurrogateEvaluator(Evaluator):
         self._y.append(np.asarray(y, dtype=float))
         return y
 
+    def evaluate_true(self, x: np.ndarray) -> np.ndarray:
+        """Truly evaluate ``x``, bypassing the surrogate and counting the cost."""
+        x = np.atleast_2d(x)
+        y = self._true_eval(x)
+        self.last_true_mask = np.ones(len(x), dtype=bool)
+        return y
+
     def __call__(self, x: np.ndarray) -> np.ndarray:
         x = np.atleast_2d(x)
         self._calls += 1
@@ -130,6 +156,7 @@ class SurrogateEvaluator(Evaluator):
         # Warm-up (and any degenerate empty-archive state): evaluate truly.
         if self._calls <= self.warmup or not self._X:
             y = self._true_eval(x)
+            self.last_true_mask = np.ones(len(x), dtype=bool)
             # Fit the surrogate once warm-up is complete so the first
             # prediction is valid.
             if self._calls >= self.warmup:
@@ -143,6 +170,7 @@ class SurrogateEvaluator(Evaluator):
                 # True generation: evaluate the whole batch, then refresh the
                 # surrogate on the updated archive.
                 y = self._true_eval(x)
+                self.last_true_mask = np.ones(len(x), dtype=bool)
                 X, yt = self._archive()
                 self.surrogate.fit(X, yt)
                 return y
@@ -152,6 +180,9 @@ class SurrogateEvaluator(Evaluator):
             y_hat = np.asarray(self.surrogate.predict(x), dtype=float).ravel()
             best = int(np.argmin(y_hat))
             y_hat[best] = self._true_eval(x[best : best + 1])[0]
+            mask = np.zeros(len(x), dtype=bool)
+            mask[best] = True
+            self.last_true_mask = mask
             return y_hat
 
         # Default "individual" strategy: pre-selection.
@@ -163,6 +194,9 @@ class SurrogateEvaluator(Evaluator):
 
         y_true = self._true_eval(x[top])
         y_hat[top] = y_true
+        mask = np.zeros(n, dtype=bool)
+        mask[top] = True
+        self.last_true_mask = mask
 
         if self._calls % self.retrain_every == 0:
             X, y = self._archive()

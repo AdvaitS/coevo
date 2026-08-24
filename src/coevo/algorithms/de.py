@@ -51,6 +51,11 @@ class DifferentialEvolution(BaseAlgorithm):
 
         pop = rng.uniform(lo, hi, size=(n, dim))
         fitness = evaluator(pop)
+        # Which entries of `fitness` came from the true objective. Predicted
+        # values are carried across generations by the selection below, so an
+        # optimistic prediction would otherwise sit in the population forever,
+        # never re-checked and impossible to displace.
+        is_true = evaluator.true_mask(n).copy()
         best_idx = int(np.argmin(fitness))
         best_x = pop[best_idx].copy()
         best_f = float(fitness[best_idx])
@@ -67,11 +72,21 @@ class DifferentialEvolution(BaseAlgorithm):
             trial = np.clip(np.where(mask, mutant, pop), lo, hi)
 
             f_trial = evaluator(trial)
+            trial_is_true = evaluator.true_mask(n)
             improved = f_trial <= fitness
             pop[improved] = trial[improved]
             fitness[improved] = f_trial[improved]
+            is_true[improved] = trial_is_true[improved]
 
             new_best = int(np.argmin(fitness))
+            # Verify the incumbent before believing it. Without this the run's
+            # best-so-far can be a surrogate artefact that never existed.
+            if not is_true[new_best]:
+                fitness[new_best] = float(
+                    np.asarray(evaluator.evaluate_true(pop[new_best : new_best + 1])).ravel()[0]
+                )
+                is_true[new_best] = True
+                new_best = int(np.argmin(fitness))
             if fitness[new_best] < best_f:
                 best_f = float(fitness[new_best])
                 best_x = pop[new_best].copy()
