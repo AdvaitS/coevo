@@ -8,8 +8,10 @@ in coevolved fitness predictors (Schmidt & Lipson, 2008).
 """
 
 from coevo import benchmarks
+from coevo import acquisition
 from coevo.algorithms import (
     DifferentialEvolution,
+    EfficientGlobalOptimization,
     GeneticAlgorithm,
     NSGA2,
     ParticleSwarmOptimization,
@@ -46,6 +48,8 @@ __all__ = [
     "MultiObjectiveProblem",
     "MultiObjectiveResult",
     "DifferentialEvolution",
+    "EfficientGlobalOptimization",
+    "acquisition",
     "GeneticAlgorithm",
     "ParticleSwarmOptimization",
     "NSGA2",
