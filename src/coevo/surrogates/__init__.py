@@ -1,7 +1,7 @@
 from coevo.surrogates.base import Surrogate
 from coevo.surrogates.clipped import ClippedPredictor
 from coevo.surrogates.coevolved import CoevolvedPredictor
-from coevo.surrogates.evolved import EvolvedPredictor, SymbolicRegressor
+from coevo.surrogates.evolved import EvolvedPredictor, ParetoModel, SymbolicRegressor
 from coevo.surrogates.gp import GaussianProcessSurrogate
 from coevo.surrogates.nearest import NearestNeighborSurrogate
 from coevo.surrogates.rbf import RBFSurrogate
@@ -17,4 +17,5 @@ __all__ = [
     "CoevolvedPredictor",
     "SymbolicRegressor",
     "EvolvedPredictor",
+    "ParetoModel",
 ]

@@ -129,16 +129,64 @@ def _random_node(
     return Node(op, args=args)
 
 
-def _fitness(tree: Node, X: np.ndarray, y: np.ndarray, parsimony: float, functions: dict) -> float:
+#: Node cost of the ``a + b * f(x)`` wrapper that linear scaling adds, so a
+#: scaled expression is not reported as cheaper than it really is.
+_AFFINE_NODES = 4
+
+
+def _raw_eval(tree: Node, X: np.ndarray, functions: dict) -> np.ndarray | None:
+    """Evaluate ``tree`` and clip; return ``None`` if the result is unusable."""
     try:
-        pred = _eval(tree, X, functions)
-    except (OverflowError, FloatingPointError, ValueError):
-        return inf
-    pred = np.clip(pred, -1e12, 1e12)
+        with np.errstate(all="ignore"):
+            pred = _eval(tree, X, functions)
+    except (OverflowError, FloatingPointError, ValueError, ZeroDivisionError):
+        return None
+    pred = np.clip(np.asarray(pred, dtype=float), -1e12, 1e12)
     if not np.all(np.isfinite(pred)):
-        return inf
+        return None
+    return pred
+
+
+def linear_scale(pred: np.ndarray, y: np.ndarray) -> tuple[float, float]:
+    """Least-squares slope and intercept mapping ``pred`` onto ``y``.
+
+    Keijzer's linear scaling (EuroGP 2003): score a candidate by how well
+    ``a + b * f(x)`` fits the target rather than ``f(x)`` itself, so the search
+    only has to discover the *shape* of the relationship and gets its scale and
+    offset for free. Returns ``(a, b)``; a constant prediction scales to the
+    mean of ``y``.
+    """
+    var = float(np.var(pred))
+    if not np.isfinite(var) or var < 1e-18:
+        return float(np.mean(y)), 0.0
+    b = float(np.cov(pred, y, bias=True)[0, 1] / var)
+    a = float(np.mean(y) - b * np.mean(pred))
+    if not (np.isfinite(a) and np.isfinite(b)):
+        return float(np.mean(y)), 0.0
+    return a, b
+
+
+def _fitness(
+    tree: Node,
+    X: np.ndarray,
+    y: np.ndarray,
+    parsimony: float,
+    functions: dict,
+    linear_scaling: bool = False,
+) -> tuple[float, float]:
+    """Return ``(penalised fitness, raw RMSE)`` for ``tree``."""
+    pred = _raw_eval(tree, X, functions)
+    if pred is None:
+        return inf, inf
+    size = _size(tree)
+    if linear_scaling:
+        a, b = linear_scale(pred, y)
+        pred = a + b * pred
+        size += _AFFINE_NODES
     rmse = float(np.sqrt(np.mean((pred - y) ** 2)))
-    return rmse + parsimony * _size(tree)
+    if not np.isfinite(rmse):
+        return inf, inf
+    return rmse + parsimony * size, rmse
 
 
 def _to_str(node: Node, functions: dict) -> str:
@@ -240,6 +288,35 @@ def _simplify_fixpoint(node: Node, functions: dict, max_iter: int = 6) -> Node:
     return node
 
 
+@dataclass
+class ParetoModel:
+    """One model on the accuracy-vs-complexity frontier, ready to apply.
+
+    Carries the expression tree, not just its rendering, so the model can be
+    scored on held-out data — which is the only way to tell a discovered law
+    from a memorised one.
+    """
+
+    expression: str
+    rmse: float
+    complexity: int
+    tree: Node
+    intercept: float
+    scale: float
+    functions: dict
+
+    def predict(self, X: np.ndarray) -> np.ndarray:
+        """Apply the model to ``X``, including its linear-scaling terms."""
+        X = _as_2d(X)
+        pred = _raw_eval(self.tree, X, self.functions)
+        if pred is None:
+            return np.full(len(X), self.intercept)
+        return self.intercept + self.scale * pred
+
+    def __str__(self) -> str:
+        return f"{self.expression}  [rmse={self.rmse:.4g}, complexity={self.complexity}]"
+
+
 class SymbolicRegressor:
     """Evolves a symbolic expression ``x -> fitness`` via genetic programming."""
 
@@ -257,6 +334,7 @@ class SymbolicRegressor:
         functions: dict[str, tuple[Callable, int, Callable[[list[str]], str]]] | None = None,
         const_range: tuple[float, float] = (-1.0, 1.0),
         refine: bool = True,
+        linear_scaling: bool = True,
     ) -> None:
         self.population_size = population_size
         self.generations = generations
@@ -269,6 +347,7 @@ class SymbolicRegressor:
         self.seed = seed
         self.const_range = const_range
         self.refine = refine
+        self.linear_scaling = linear_scaling
         self._functions = dict(_DEFAULT_FUNCTIONS)
         if functions:
             for name, spec in functions.items():
@@ -278,6 +357,11 @@ class SymbolicRegressor:
                     self._functions[name] = spec
         self.best_: Node | None = None
         self.best_rmse_: float = inf
+        self.intercept_: float = 0.0
+        self.scale_: float = 1.0
+        #: complexity -> (rmse, tree, intercept, scale) for the best expression
+        #: seen at each size. Populated during :meth:`fit`.
+        self.hall_of_fame_: dict[int, tuple[float, Node, float, float]] = {}
 
     def fit(self, X: np.ndarray, y: np.ndarray) -> "SymbolicRegressor":
         X = _as_2d(X)
@@ -287,11 +371,29 @@ class SymbolicRegressor:
         rng = np.random.default_rng(self.seed)
         dim = X.shape[1]
 
+        self.hall_of_fame_ = {}
+
+        def _score(trees: list[Node]) -> np.ndarray:
+            """Penalised fitness for a population, recording each size's best."""
+            out = np.empty(len(trees))
+            for i, tree in enumerate(trees):
+                out[i], rmse = _fitness(
+                    tree, X, y, self.parsimony, self._functions, self.linear_scaling
+                )
+                if not np.isfinite(rmse):
+                    continue
+                complexity = _size(tree) + (_AFFINE_NODES if self.linear_scaling else 0)
+                known = self.hall_of_fame_.get(complexity)
+                if known is None or rmse < known[0]:
+                    a, b = self._scaling_for(tree, X, y)
+                    self.hall_of_fame_[complexity] = (float(rmse), tree, a, b)
+            return out
+
         pop = [
             _random_node(rng, dim, 0, self.max_depth, self.const_range, self._functions)
             for _ in range(self.population_size)
         ]
-        fits = np.array([_fitness(t, X, y, self.parsimony, self._functions) for t in pop])
+        fits = _score(pop)
 
         best, best_fit = pop[int(np.argmin(fits))], float(np.min(fits))
 
@@ -308,17 +410,13 @@ class SymbolicRegressor:
                 c2 = _mutate(rng, c2, dim, self.max_depth, self.max_size, self._functions, self.const_range) if rng.random() < self.mutation_p else c2
                 new_pop.extend((c1, c2))
             pop = new_pop[: self.population_size]
-            fits = np.array([_fitness(t, X, y, self.parsimony, self._functions) for t in pop])
+            fits = _score(pop)
             gi = int(np.argmin(fits))
             if fits[gi] < best_fit:
                 best, best_fit = pop[gi], float(fits[gi])
 
         def _rmse_of(tree: Node) -> float:
-            with np.errstate(all="ignore"):
-                pred = np.clip(_eval(tree, X, self._functions), -1e12, 1e12)
-            if not np.all(np.isfinite(pred)):
-                return inf
-            return float(np.sqrt(np.mean((pred - y) ** 2)))
+            return _fitness(tree, X, y, 0.0, self._functions, self.linear_scaling)[1]
 
         # Simplification rewrites the tree using algebraic identities that the
         # protected operators do not always satisfy, so accept it only when it
@@ -332,7 +430,50 @@ class SymbolicRegressor:
             self.best_, self.best_rmse_ = best, raw_rmse
         if self.refine:
             self.refine_constants(X, y)
+        self.intercept_, self.scale_ = self._scaling_for(self.best_, X, y)
+        self.best_rmse_ = _rmse_of(self.best_)
         return self
+
+    def _scaling_for(self, tree: Node, X: np.ndarray, y: np.ndarray) -> tuple[float, float]:
+        """The ``(intercept, scale)`` pair this model applies to ``tree``."""
+        if not self.linear_scaling:
+            return 0.0, 1.0
+        pred = _raw_eval(tree, X, self._functions)
+        if pred is None:
+            return 0.0, 1.0
+        return linear_scale(pred, y)
+
+    def pareto_front(self) -> list["ParetoModel"]:
+        """Non-dominated models from this run, ordered by increasing complexity.
+
+        Genetic programming visits far more of the accuracy/complexity trade-off
+        than a single winner records. The hall of fame keeps the best expression
+        seen at every size, so one run yields the whole front rather than one
+        point — and there is no need to sweep the parsimony coefficient to
+        approximate it.
+
+        Each entry is a :class:`ParetoModel`, which carries the expression tree
+        and so can be applied to new data. Returning only the rendered string
+        would make held-out evaluation impossible without re-parsing it.
+        """
+        best_so_far = inf
+        front: list[ParetoModel] = []
+        for complexity in sorted(self.hall_of_fame_):
+            rmse, tree, a, b = self.hall_of_fame_[complexity]
+            if rmse < best_so_far:
+                best_so_far = rmse
+                front.append(
+                    ParetoModel(
+                        expression=self._render(tree, a, b),
+                        rmse=float(rmse),
+                        complexity=int(complexity),
+                        tree=tree,
+                        intercept=a,
+                        scale=b,
+                        functions=self._functions,
+                    )
+                )
+        return front
 
     def refine_constants(self, X: np.ndarray, y: np.ndarray) -> "SymbolicRegressor":
         """Refit the evolved expression's constants by nonlinear least squares.
@@ -367,8 +508,15 @@ class SymbolicRegressor:
             return fn(*(_eval_params(a, p, counter) for a in node.args))
 
         def residual(p: np.ndarray) -> np.ndarray:
-            pred = _eval_params(self.best_, p, [0])
-            return np.clip(pred, -1e6, 1e6) - y
+            pred = np.clip(_eval_params(self.best_, p, [0]), -1e6, 1e6)
+            pred = np.nan_to_num(pred, nan=0.0, posinf=1e6, neginf=-1e6)
+            if self.linear_scaling:
+                # Refine against the same objective the search optimised: the
+                # error *after* scaling, not before. Otherwise the solver fights
+                # to fix an offset that linear scaling supplies for free.
+                a, b = linear_scale(pred, y)
+                pred = a + b * pred
+            return pred - y
 
         from scipy.optimize import least_squares
 
@@ -396,17 +544,33 @@ class SymbolicRegressor:
         X = _as_2d(X)
         if self.best_ is None:
             raise RuntimeError("SymbolicRegressor must be fitted before predict().")
-        return np.asarray(_eval(self.best_, X, self._functions), dtype=float).ravel()
+        with np.errstate(all="ignore"):
+            pred = np.asarray(_eval(self.best_, X, self._functions), dtype=float).ravel()
+        pred = np.clip(np.nan_to_num(pred, nan=0.0, posinf=1e12, neginf=-1e12), -1e12, 1e12)
+        return self.intercept_ + self.scale_ * pred
+
+    def _render(self, tree: Node, intercept: float, scale: float) -> str:
+        """Render ``tree`` including the affine terms actually applied to it."""
+        inner = _to_str(tree, self._functions)
+        if scale == 0.0:
+            return f"{intercept:.4g}"
+        if abs(scale - 1.0) > 1e-9:
+            inner = f"({scale:.4g} * {inner})"
+        if abs(intercept) > 1e-9:
+            inner = f"({intercept:.4g} + {inner})"
+        return inner
 
     def expression(self) -> str:
         if self.best_ is None:
             raise RuntimeError("SymbolicRegressor must be fitted before expression().")
-        return _to_str(self.best_, self._functions)
+        return self._render(self.best_, self.intercept_, self.scale_)
 
     @property
     def complexity(self) -> int:
-        """Number of nodes in the evolved expression (0 if not fitted)."""
-        return _size(self.best_) if self.best_ is not None else 0
+        """Node count of the expression, including any linear-scaling terms."""
+        if self.best_ is None:
+            return 0
+        return _size(self.best_) + (_AFFINE_NODES if self.linear_scaling else 0)
 
 
 def _tournament(rng: np.random.Generator, fits: np.ndarray, k: int) -> int:
