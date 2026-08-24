@@ -41,44 +41,48 @@ ALGORITHMS = {
     "PSO": ParticleSwarmOptimization,
 }
 
+# Factories, not instances. A shared predictor object would accumulate
+# `error_trace` across every algorithm x problem x seed in the sweep, making the
+# library's own diagnostic meaningless, and would leak state into any future
+# surrogate that keeps more than the last fit.
 SURROGATES = [
     ("exact", None),
-    ("surrogate (1-NN)", CoevolvedPredictor(NearestNeighborSurrogate())),
-    ("surrogate (RBF)", CoevolvedPredictor(RBFSurrogate())),
-    ("surrogate (RBF, clipped)", CoevolvedPredictor(ClippedPredictor(RBFSurrogate()))),
+    ("surrogate (1-NN)", lambda: CoevolvedPredictor(NearestNeighborSurrogate())),
+    ("surrogate (RBF)", lambda: CoevolvedPredictor(RBFSurrogate())),
+    ("surrogate (RBF, clipped)", lambda: CoevolvedPredictor(ClippedPredictor(RBFSurrogate()))),
 ]
 
 POP_SIZE = 50
 
 
-def _make_evaluator(problem, surrogate):
-    if surrogate is None:
+def _make_evaluator(problem, factory):
+    if factory is None:
         return TrueEvaluator(problem)
     return SurrogateEvaluator(
-        problem, surrogate, eval_fraction=0.25, warmup=5, archive_size=100
+        problem, factory(), eval_fraction=0.25, warmup=5, archive_size=100
     )
 
 
-def _median_best(algo_cls, make_problem, seeds, generations, surrogate):
+def _median_best(algo_cls, make_problem, seeds, generations, factory):
     bests, evals = [], []
     for seed in seeds:
         problem = make_problem()
         algo = algo_cls(pop_size=POP_SIZE, generations=generations, seed=seed)
-        evaluator = _make_evaluator(problem, surrogate)
+        evaluator = _make_evaluator(problem, factory)
         result = algo.optimize(problem, evaluator)
         bests.append(result.best_fitness)
         evals.append(result.true_evaluations)
     return median(bests), int(median(evals))
 
 
-def _median_best_at_budget(algo_cls, make_problem, seeds, budget, surrogate):
+def _median_best_at_budget(algo_cls, make_problem, seeds, budget, factory):
     bests, evals = [], []
     for seed in seeds:
         problem = make_problem()
         algo = algo_cls(
             pop_size=POP_SIZE, generations=10_000_000, seed=seed, max_evaluations=budget
         )
-        evaluator = _make_evaluator(problem, surrogate)
+        evaluator = _make_evaluator(problem, factory)
         result = algo.optimize(problem, evaluator)
         bests.append(result.best_fitness)
         evals.append(result.true_evaluations)
@@ -143,15 +147,15 @@ def main() -> None:
     if args.budget is not None:
         print(f"# coevo benchmark (budget={args.budget} true evals, seeds={args.seeds})")
         print()
-        print("| algorithm | problem | evaluator | best fitness @ budget (median) |")
-        print("|---|---|---|---|")
+        print("| algorithm | problem | evaluator | best fitness @ budget (median) | true evals |")
+        print("|---|---|---|---|---|")
         for name, make_problem in problems:
             for algo_name, algo_cls in ALGORITHMS.items():
-                for label, surrogate in SURROGATES:
-                    best, _ = _median_best_at_budget(
-                        algo_cls, make_problem, seeds, args.budget, surrogate
+                for label, factory in SURROGATES:
+                    best, evals = _median_best_at_budget(
+                        algo_cls, make_problem, seeds, args.budget, factory
                     )
-                    print(f"| {algo_name} | {name} | {label} | {best:.4g} |")
+                    print(f"| {algo_name} | {name} | {label} | {best:.4g} | {evals} |")
         return
 
     print(
@@ -162,9 +166,9 @@ def main() -> None:
     print("|---|---|---|---|---|")
     for name, make_problem in problems:
         for algo_name, algo_cls in ALGORITHMS.items():
-            for label, surrogate in SURROGATES:
+            for label, factory in SURROGATES:
                 best, evals = _median_best(
-                    algo_cls, make_problem, seeds, args.generations, surrogate
+                    algo_cls, make_problem, seeds, args.generations, factory
                 )
                 print(f"| {algo_name} | {name} | {label} | {best:.4g} | {evals} |")
 

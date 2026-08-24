@@ -12,7 +12,14 @@ from coevo.evaluation import Evaluator
 
 class GeneticAlgorithm(BaseAlgorithm):
     """A simple real-coded GA: tournament selection, arithmetic crossover,
-    Gaussian mutation, and elitism."""
+    Gaussian mutation, and elitism.
+
+    ``mutation_sigma`` is a *fraction of each dimension's range*, not an
+    absolute step. An absolute default cannot be right for every problem: 0.1
+    is a reasonable step on sphere's [-5.12, 5.12] but only 0.15% of ackley's
+    [-32.768, 32.768], which is far too small to escape a local basin. That is
+    what kept this GA pinned at 8.53 on ackley(5) no matter how long it ran.
+    """
 
     def __init__(
         self,
@@ -20,7 +27,7 @@ class GeneticAlgorithm(BaseAlgorithm):
         generations: int = 100,
         crossover_p: float = 0.9,
         mutation_p: float = 0.1,
-        mutation_sigma: float = 0.1,
+        mutation_sigma: float = 0.01,
         tournament_size: int = 3,
         elite: int = 1,
         seed: int = 0,
@@ -53,6 +60,7 @@ class GeneticAlgorithm(BaseAlgorithm):
 
         pop = rng.uniform(lo, hi, size=(n, dim))
         fitness = evaluator(pop)
+        is_true = evaluator.true_mask(n).copy()
         history = [float(np.min(fitness))]
 
         for _ in range(self.generations):
@@ -71,21 +79,40 @@ class GeneticAlgorithm(BaseAlgorithm):
                     offspring[i] = alpha * x + (1 - alpha) * y
                     offspring[i + 1] = (1 - alpha) * x + alpha * y
 
-            # Gaussian mutation.
+            # Gaussian mutation, scaled to each dimension's range.
             mask = rng.random(offspring.shape) < self.mutation_p
-            noise = rng.normal(0.0, self.mutation_sigma, offspring.shape)
+            noise = rng.normal(0.0, self.mutation_sigma * (hi - lo), offspring.shape)
             offspring = np.clip(np.where(mask, offspring + noise, offspring), lo, hi)
 
             f_off = evaluator(offspring)
+            off_is_true = evaluator.true_mask(len(offspring))
 
-            # Elitism: keep the best `elite` parents plus the best offspring.
-            combined = np.vstack([pop, offspring])
-            f_combined = np.concatenate([fitness, f_off])
-            order = np.argsort(f_combined)
-            pop = combined[order[:n]]
-            fitness = f_combined[order[:n]]
+            # Generational replacement with elitism: the best `elite` parents
+            # survive and the rest of the population is replaced by offspring.
+            #
+            # Sorting [parents; offspring] and taking the top n instead -- which
+            # is what this used to do -- is (mu+lambda) truncation selection, and
+            # is far greedier than the docstring's "tournament selection with
+            # elitism". It converges the population within a few dozen
+            # generations and then cannot escape: on ackley(5) the run sat at
+            # 8.5348 from generation 50 through generation 1000, unmoved by 20x
+            # more budget.
+            elite = max(0, min(self.elite, n))
+            keep = np.argsort(fitness)[:elite]
+            pop = np.vstack([pop[keep], offspring])[:n]
+            fitness = np.concatenate([fitness[keep], f_off])[:n]
+            is_true = np.concatenate([is_true[keep], off_is_true])[:n]
 
-            history.append(float(fitness[0]))
+            # Verify the incumbent before recording it, so the reported best is
+            # never a surrogate artefact carried forward from an earlier batch.
+            best_idx = int(np.argmin(fitness))
+            if not is_true[best_idx]:
+                fitness[best_idx] = float(
+                    np.asarray(evaluator.evaluate_true(pop[best_idx : best_idx + 1])).ravel()[0]
+                )
+                is_true[best_idx] = True
+
+            history.append(float(np.min(fitness)))
 
         best_idx = int(np.argmin(fitness))
         best_x = pop[best_idx].copy()
