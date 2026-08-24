@@ -229,3 +229,62 @@ def test_linear_scaling_expression_and_predict_agree():
     from coevo.surrogates.evolved import _AFFINE_NODES, _size
 
     assert model.complexity == _size(model.best_) + _AFFINE_NODES
+
+
+def test_optimize_tree_constants_does_not_mutate_shared_subtrees():
+    """Crossover shares node objects; tuning one individual must not alter another.
+
+    _replace splices the *same* subtree object into a child rather than a copy,
+    so an in-place constant edit would silently rewrite every individual holding
+    that subtree.
+    """
+    from coevo.surrogates.evolved import (
+        _DEFAULT_FUNCTIONS,
+        Node,
+        optimize_tree_constants,
+    )
+
+    shared = Node("c", val=0.5)
+    tree = Node("*", args=(shared, Node("x", idx=0)))
+    other = Node("+", args=(shared, Node("x", idx=0)))  # holds the same object
+
+    X = np.linspace(0.5, 4.0, 30).reshape(-1, 1)
+    y = 7.0 * X[:, 0]
+    tuned = optimize_tree_constants(tree, X, y, _DEFAULT_FUNCTIONS, linear_scaling=False)
+
+    assert shared.val == 0.5, "the original constant was mutated in place"
+    assert other.args[0].val == 0.5, "a sibling individual was corrupted"
+    assert tuned is not tree
+    np.testing.assert_allclose(
+        _eval_helper(tuned, X), 7.0 * X[:, 0], rtol=1e-4
+    )
+
+
+def _eval_helper(tree, X):
+    from coevo.surrogates.evolved import _DEFAULT_FUNCTIONS, _eval
+
+    return _eval(tree, X, _DEFAULT_FUNCTIONS)
+
+
+def test_optimize_every_is_off_by_default():
+    """Measured on biosym's benchmark it did not move the solution rate, so it
+    is available but not on by default."""
+    from coevo.surrogates.evolved import SymbolicRegressor
+
+    assert SymbolicRegressor().optimize_every == 0
+
+
+def test_periodic_optimization_runs_and_preserves_consistency():
+    from coevo.surrogates.evolved import SymbolicRegressor
+
+    rng = np.random.default_rng(0)
+    X = rng.uniform(0.5, 5.0, size=(60, 1))
+    y = 2.0 * np.log(X[:, 0]) + 1.0
+    model = SymbolicRegressor(
+        population_size=120, generations=20, seed=0, optimize_every=3, optimize_top_k=3
+    ).fit(X, y)
+    actual = float(np.sqrt(np.mean((model.predict(X) - y) ** 2)))
+    assert actual == pytest.approx(model.best_rmse_, rel=1e-6, abs=1e-9)
+    for entry in model.pareto_front():
+        got = float(np.sqrt(np.mean((entry.predict(X) - y) ** 2)))
+        assert got == pytest.approx(entry.rmse, rel=1e-6, abs=1e-9)

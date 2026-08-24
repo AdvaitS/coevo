@@ -109,6 +109,17 @@ def _replace(node: Node, target: Node, replacement: Node) -> Node:
     )
 
 
+def _deep_copy(node: Node) -> Node:
+    """A structurally identical tree that shares no nodes with the original.
+
+    Crossover splices the *same* subtree object into a child rather than a copy,
+    so nodes are shared across the population. Optimising an individual's
+    constants in place would therefore silently rewrite every other individual
+    that happens to share that subtree.
+    """
+    return Node(node.op, tuple(_deep_copy(a) for a in node.args), node.idx, node.val)
+
+
 def _random_node(
     rng: np.random.Generator,
     dim: int,
@@ -317,6 +328,65 @@ class ParetoModel:
         return f"{self.expression}  [rmse={self.rmse:.4g}, complexity={self.complexity}]"
 
 
+def optimize_tree_constants(
+    tree: Node,
+    X: np.ndarray,
+    y: np.ndarray,
+    functions: dict,
+    linear_scaling: bool = True,
+    max_nfev: int = 60,
+) -> Node:
+    """Return a copy of ``tree`` with its constants refit by least squares.
+
+    Genetic programming discovers structure quickly but carries whatever
+    ephemeral constants a subtree happened to inherit. Judging structures on
+    those constants means a correct structure with poor constants loses to a
+    wrong structure with lucky ones -- and is discarded before anything can
+    refine it. Running this during the search, rather than only on the winner,
+    is what lets the right shape survive long enough to be found.
+    """
+    tree = _deep_copy(tree)
+    constants: list[Node] = []
+    _collect_constants(tree, constants)
+    if not constants or len(constants) > len(y):
+        return tree
+
+    init = np.array([c.val for c in constants], dtype=float)
+
+    def _eval_params(node: Node, p: np.ndarray, counter: list[int]) -> np.ndarray:
+        if node.op == "x":
+            return X[:, node.idx]
+        if node.op == "c":
+            v = p[counter[0]]
+            counter[0] += 1
+            return np.full(X.shape[0], v)
+        return functions[node.op][0](*(_eval_params(a, p, counter) for a in node.args))
+
+    def residual(p: np.ndarray) -> np.ndarray:
+        with np.errstate(all="ignore"):
+            pred = np.nan_to_num(
+                np.clip(_eval_params(tree, p, [0]), -1e6, 1e6), nan=1e6, posinf=1e6, neginf=-1e6
+            )
+            if linear_scaling:
+                a, b = linear_scale(pred, y)
+                pred = a + b * pred
+        return pred - y
+
+    from scipy.optimize import least_squares
+
+    try:
+        with np.errstate(all="ignore"):
+            before = float(np.sqrt(np.mean(residual(init) ** 2)))
+            result = least_squares(residual, init, method="lm", max_nfev=max_nfev)
+            after = float(np.sqrt(np.mean(residual(result.x) ** 2)))
+    except (ValueError, TypeError, np.linalg.LinAlgError):
+        return tree
+    if np.isfinite(after) and after < before:
+        for c, v in zip(constants, result.x):
+            c.val = float(v)
+    return tree
+
+
 class SymbolicRegressor:
     """Evolves a symbolic expression ``x -> fitness`` via genetic programming."""
 
@@ -335,6 +405,8 @@ class SymbolicRegressor:
         const_range: tuple[float, float] = (-1.0, 1.0),
         refine: bool = True,
         linear_scaling: bool = True,
+        optimize_every: int = 0,
+        optimize_top_k: int = 3,
     ) -> None:
         self.population_size = population_size
         self.generations = generations
@@ -348,6 +420,8 @@ class SymbolicRegressor:
         self.const_range = const_range
         self.refine = refine
         self.linear_scaling = linear_scaling
+        self.optimize_every = optimize_every
+        self.optimize_top_k = optimize_top_k
         self._functions = dict(_DEFAULT_FUNCTIONS)
         if functions:
             for name, spec in functions.items():
@@ -397,7 +471,33 @@ class SymbolicRegressor:
 
         best, best_fit = pop[int(np.argmin(fits))], float(np.min(fits))
 
-        for _ in range(self.generations):
+        for generation in range(self.generations):
+            # Periodically refit the constants of the best few individuals, so a
+            # promising structure is judged on constants that fit it rather than
+            # on whatever it inherited. Replaces the individuals in place (with
+            # copies -- nodes are shared across the population).
+            if self.optimize_every > 0 and (generation + 1) % self.optimize_every == 0:
+                for idx in np.argsort(fits)[: max(1, self.optimize_top_k)]:
+                    idx = int(idx)
+                    tuned = optimize_tree_constants(
+                        pop[idx], X, y, self._functions, self.linear_scaling
+                    )
+                    penalised, rmse = _fitness(
+                        tuned, X, y, self.parsimony, self._functions, self.linear_scaling
+                    )
+                    if penalised < fits[idx]:
+                        pop[idx], fits[idx] = tuned, penalised
+                        if penalised < best_fit:
+                            best, best_fit = tuned, float(penalised)
+                        if np.isfinite(rmse):
+                            complexity = _size(tuned) + (
+                                _AFFINE_NODES if self.linear_scaling else 0
+                            )
+                            known = self.hall_of_fame_.get(complexity)
+                            if known is None or rmse < known[0]:
+                                a, b = self._scaling_for(tuned, X, y)
+                                self.hall_of_fame_[complexity] = (float(rmse), tuned, a, b)
+
             new_pop = [best]  # elitism
             while len(new_pop) < self.population_size:
                 p1 = pop[int(_tournament(rng, fits, self.tournament_size))]
