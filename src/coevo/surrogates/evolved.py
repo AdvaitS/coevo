@@ -51,6 +51,23 @@ class Node:
     val: float = 0.0  # constant value, for op == "c"
 
 
+def _as_2d(X: np.ndarray) -> np.ndarray:
+    """Coerce ``X`` to ``(n_samples, n_features)``.
+
+    ``np.atleast_2d`` turns a 1-D array of ``n`` samples into ``(1, n)`` -- one
+    sample with ``n`` features -- which silently produces a model over imaginary
+    features instead of raising. A 1-D input is always a single feature here.
+    """
+    X = np.asarray(X, dtype=float)
+    if X.ndim == 0:
+        return X.reshape(1, 1)
+    if X.ndim == 1:
+        return X.reshape(-1, 1)
+    if X.ndim > 2:
+        raise ValueError(f"X must be 1- or 2-dimensional, got shape {X.shape}")
+    return X
+
+
 def _eval(node: Node, X: np.ndarray, functions: dict) -> np.ndarray:
     op = node.op
     if op == "x":
@@ -174,10 +191,12 @@ def _simplify(node: Node, functions: dict) -> Node:
         a = args[0]
         if op == "neg" and a.op == "neg":
             return a.args[0]
-        if op == "exp" and a.op == "log":
-            return a.args[0]
-        if op == "log" and a.op == "exp":
-            return a.args[0]
+        # NOTE: exp(log(x)) -> x and log(exp(x)) -> x are *not* valid rewrites
+        # here. ``log`` clips its argument to 1e-9 and ``exp`` clips to +/-50, so
+        # the protected pair is not the identity outside those domains --
+        # exp(log(-3)) evaluates to 1e-9, not -3. Applying the rewrite silently
+        # changes the model's predictions. Do not reintroduce them without an
+        # interval-arithmetic domain check (Keijzer, EuroGP 2003).
         return Node(op, args=args)
 
     if arity == 2:
@@ -261,8 +280,10 @@ class SymbolicRegressor:
         self.best_rmse_: float = inf
 
     def fit(self, X: np.ndarray, y: np.ndarray) -> "SymbolicRegressor":
-        X = np.atleast_2d(X)
+        X = _as_2d(X)
         y = np.asarray(y, dtype=float).ravel()
+        if len(X) != len(y):
+            raise ValueError(f"X and y length mismatch: {len(X)} samples vs {len(y)} targets")
         rng = np.random.default_rng(self.seed)
         dim = X.shape[1]
 
@@ -280,7 +301,7 @@ class SymbolicRegressor:
                 p1 = pop[int(_tournament(rng, fits, self.tournament_size))]
                 p2 = pop[int(_tournament(rng, fits, self.tournament_size))]
                 if rng.random() < self.crossover_p:
-                    c1, c2 = _crossover(rng, p1, p2)
+                    c1, c2 = _crossover(rng, p1, p2, max_size=self.max_size)
                 else:
                     c1, c2 = p1, p2
                 c1 = _mutate(rng, c1, dim, self.max_depth, self.max_size, self._functions, self.const_range) if rng.random() < self.mutation_p else c1
@@ -292,9 +313,23 @@ class SymbolicRegressor:
             if fits[gi] < best_fit:
                 best, best_fit = pop[gi], float(fits[gi])
 
-        self.best_ = _simplify_fixpoint(best, self._functions)
-        pred = np.clip(_eval(self.best_, X, self._functions), -1e12, 1e12)
-        self.best_rmse_ = float(np.sqrt(np.mean((pred - y) ** 2)))
+        def _rmse_of(tree: Node) -> float:
+            with np.errstate(all="ignore"):
+                pred = np.clip(_eval(tree, X, self._functions), -1e12, 1e12)
+            if not np.all(np.isfinite(pred)):
+                return inf
+            return float(np.sqrt(np.mean((pred - y) ** 2)))
+
+        # Simplification rewrites the tree using algebraic identities that the
+        # protected operators do not always satisfy, so accept it only when it
+        # does not make the model worse.
+        raw_rmse = _rmse_of(best)
+        simplified = _simplify_fixpoint(best, self._functions)
+        simplified_rmse = _rmse_of(simplified)
+        if simplified_rmse <= raw_rmse + 1e-12:
+            self.best_, self.best_rmse_ = simplified, simplified_rmse
+        else:
+            self.best_, self.best_rmse_ = best, raw_rmse
         if self.refine:
             self.refine_constants(X, y)
         return self
@@ -313,10 +348,13 @@ class SymbolicRegressor:
         if not constants:
             return self
 
-        X = np.atleast_2d(X)
+        X = _as_2d(X)
         y = np.asarray(y, dtype=float).ravel()
         functions = self._functions
         init = np.array([c.val for c in constants], dtype=float)
+        # Levenberg-Marquardt requires at least as many residuals as parameters.
+        if len(init) > len(y):
+            return self
 
         def _eval_params(node: Node, p: np.ndarray, counter: list[int]) -> np.ndarray:
             if node.op == "x":
@@ -335,13 +373,19 @@ class SymbolicRegressor:
         from scipy.optimize import least_squares
 
         rng = np.random.default_rng(0)
-        best_params, best_err = init, float(np.sqrt(np.mean(residual(init) ** 2)))
-        for restart in range(3):
-            init_try = init if restart == 0 else init + rng.normal(0.0, 0.5, size=init.shape)
-            result = least_squares(residual, init_try, method="lm", max_nfev=300)
-            err = float(np.sqrt(np.mean(residual(result.x) ** 2)))
-            if err < best_err:
-                best_err, best_params = err, result.x
+        with np.errstate(all="ignore"):
+            best_params, best_err = init, float(np.sqrt(np.mean(residual(init) ** 2)))
+            for restart in range(3):
+                init_try = init if restart == 0 else init + rng.normal(0.0, 0.5, size=init.shape)
+                try:
+                    result = least_squares(residual, init_try, method="lm", max_nfev=300)
+                except (ValueError, TypeError, np.linalg.LinAlgError):
+                    continue
+                err = float(np.sqrt(np.mean(residual(result.x) ** 2)))
+                if err < best_err:
+                    best_err, best_params = err, result.x
+        if not np.isfinite(best_err):
+            return self
 
         for c, v in zip(constants, best_params):
             c.val = float(v)
@@ -349,7 +393,7 @@ class SymbolicRegressor:
         return self
 
     def predict(self, X: np.ndarray) -> np.ndarray:
-        X = np.atleast_2d(X)
+        X = _as_2d(X)
         if self.best_ is None:
             raise RuntimeError("SymbolicRegressor must be fitted before predict().")
         return np.asarray(_eval(self.best_, X, self._functions), dtype=float).ravel()
@@ -370,14 +414,27 @@ def _tournament(rng: np.random.Generator, fits: np.ndarray, k: int) -> int:
     return int(idx[np.argmin(fits[idx])])
 
 
-def _crossover(rng: np.random.Generator, p1: Node, p2: Node) -> tuple[Node, Node]:
+def _crossover(
+    rng: np.random.Generator, p1: Node, p2: Node, max_size: int = 0, tries: int = 6
+) -> tuple[Node, Node]:
+    """Subtree crossover, respecting ``max_size`` if it is positive.
+
+    Without a size bound, subtree crossover is the dominant source of bloat: a
+    small parent can adopt an arbitrarily large subtree, so ``max_size`` ends up
+    enforced only on mutation and the tree grows without limit. Resample the cut
+    points a few times and fall back to the parents if no child fits.
+    """
     n1: list[Node] = []
     n2: list[Node] = []
     _collect(p1, n1)
     _collect(p2, n2)
-    s1 = n1[int(rng.integers(len(n1)))]
-    s2 = n2[int(rng.integers(len(n2)))]
-    return _replace(p1, s1, s2), _replace(p2, s2, s1)
+    for _ in range(max(1, tries)):
+        s1 = n1[int(rng.integers(len(n1)))]
+        s2 = n2[int(rng.integers(len(n2)))]
+        c1, c2 = _replace(p1, s1, s2), _replace(p2, s2, s1)
+        if max_size <= 0 or (_size(c1) <= max_size and _size(c2) <= max_size):
+            return c1, c2
+    return p1, p2
 
 
 def _mutate(
