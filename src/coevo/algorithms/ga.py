@@ -116,7 +116,7 @@ class GeneticAlgorithm(BaseAlgorithm):
 
         best_idx = int(np.argmin(fitness))
         best_x = pop[best_idx].copy()
-        true_best = float(problem.evaluate(best_x)[0])
+        true_best = float(problem.evaluate_noiseless(best_x)[0])
         return OptimizationResult(
             problem,
             best_x,

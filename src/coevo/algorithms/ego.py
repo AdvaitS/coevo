@@ -120,7 +120,7 @@ class EfficientGlobalOptimization(BaseAlgorithm):
                 best_f, best_x = value, nxt.copy()
             history.append(best_f)
 
-        true_best = float(problem.evaluate(best_x)[0])
+        true_best = float(problem.evaluate_noiseless(best_x)[0])
         return OptimizationResult(
             problem,
             best_x,
