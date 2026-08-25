@@ -31,12 +31,31 @@ _DEFAULT_FUNCTIONS: dict[str, tuple[Callable, int, Callable[[list[str]], str]]] 
     "+": (lambda a, b: a + b, 2, _infix("+")),
     "-": (lambda a, b: a - b, 2, _infix("-")),
     "*": (lambda a, b: a * b, 2, _infix("*")),
+    # Division keeps its epsilon guard, unlike log and exp, because measurement
+    # says so: making a vanishing denominator invalid raised faithfulness 38->40
+    # of 42 but dropped ground-truth recovery 18->15 and cost 13% RMSE. Division
+    # is the only route to a rational law like x/(K+x), and a denominator that
+    # momentarily passes through zero mid-search is a structure worth keeping
+    # rather than an expression worth discarding.
     "/": (lambda a, b: a / np.where(np.abs(b) < 1e-9, 1e-9, b), 2, _infix("/")),
     "neg": (lambda a: -a, 1, lambda c: f"(-{c[0]})"),
     "sin": (np.sin, 1, lambda c: f"sin({c[0]})"),
     "cos": (np.cos, 1, lambda c: f"cos({c[0]})"),
-    "exp": (lambda a: np.exp(np.clip(a, -50.0, 50.0)), 1, lambda c: f"exp({c[0]})"),
-    "log": (lambda a: np.log(np.clip(a, 1e-9, None)), 1, lambda c: f"log({c[0]})"),
+    # Clipped at the float64 limit (exp(709.78) is the largest finite double), not
+    # at a convenient small number. A tight clamp turns exp into a *saturating*
+    # operator, and the search will exploit that: log(exp(u)) reads as u but
+    # computes min(u, clamp), a free sigmoid that no rendering shows and that
+    # sympy -- which simplifies log(exp(u)) to u -- cannot see either. The
+    # symbolic and numeric layers have to agree or the recovery metric scores a
+    # different function than the model computes.
+    "exp": (lambda a: np.exp(np.clip(a, -700.0, 700.0)), 1, lambda c: f"exp({c[0]})"),
+    # NaN, not a clamped value, outside the domain. Clamping to 1e-9 invents a
+    # real value for log of a negative number -- log(-3.4) silently becomes
+    # log(1e-9) = -20.7 -- so the model computes something the rendered string
+    # and sympy do not. _raw_eval turns the NaN into an invalid individual,
+    # which is the honest outcome: that expression has no real value on that
+    # data.
+    "log": (lambda a: np.log(np.where(a > 0.0, a, np.nan)), 1, lambda c: f"log({c[0]})"),
     "sq": (lambda a: a * a, 1, lambda c: f"({c[0]})**2"),
 }
 
@@ -145,15 +164,33 @@ def _random_node(
 _AFFINE_NODES = 4
 
 
+#: Values beyond this are treated as unusable rather than clipped. Clipping a
+#: prediction silently replaces the expression with a different function -- a
+#: saturating one -- and the rendered string, the sympy conversion and the model
+#: then disagree. An expression that reaches 1e12 on the training data is not a
+#: model of anything, so rejecting it costs nothing and keeps the three
+#: representations in step.
+_MAGNITUDE_LIMIT = 1e12
+
+
 def _raw_eval(tree: Node, X: np.ndarray, functions: dict) -> np.ndarray | None:
-    """Evaluate ``tree`` and clip; return ``None`` if the result is unusable."""
+    """Evaluate ``tree``; return ``None`` if the result is unusable.
+
+    "Unusable" includes *exceeding the magnitude limit*, not only non-finite.
+    The previous behaviour clipped instead, which meant a tree whose output ran
+    away silently became a clipped -- that is, saturating -- version of itself,
+    scoring as a shape it does not have and rendering as a string it does not
+    compute.
+    """
     try:
         with np.errstate(all="ignore"):
             pred = _eval(tree, X, functions)
     except (OverflowError, FloatingPointError, ValueError, ZeroDivisionError):
         return None
-    pred = np.clip(np.asarray(pred, dtype=float), -1e12, 1e12)
+    pred = np.asarray(pred, dtype=float)
     if not np.all(np.isfinite(pred)):
+        return None
+    if np.any(np.abs(pred) > _MAGNITUDE_LIMIT):
         return None
     return pred
 
@@ -251,7 +288,7 @@ def _simplify(node: Node, functions: dict) -> Node:
         if op == "neg" and a.op == "neg":
             return a.args[0]
         # NOTE: exp(log(x)) -> x and log(exp(x)) -> x are *not* valid rewrites
-        # here. ``log`` clips its argument to 1e-9 and ``exp`` clips to +/-50, so
+        # here. ``log`` is NaN outside its domain and ``exp`` clips to +/-700, so
         # the protected pair is not the identity outside those domains --
         # exp(log(-3)) evaluates to 1e-9, not -3. Applying the rewrite silently
         # changes the model's predictions. Do not reintroduce them without an
