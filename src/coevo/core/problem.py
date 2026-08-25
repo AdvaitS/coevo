@@ -54,12 +54,30 @@ class Problem:
         self._rng = np.random.default_rng(self.seed)
 
     def evaluate(self, x: np.ndarray) -> np.ndarray:
-        """Evaluate the objective on a batch ``x`` of shape ``(n, dim)``."""
+        """Evaluate the objective on a batch ``x`` of shape ``(n, dim)``.
+
+        Includes observation noise when ``noise`` is set. This is what an
+        optimizer is allowed to see, and what counts against its budget.
+        """
         x = np.atleast_2d(x)
         fitness = np.asarray(self.func(x), dtype=float).ravel()
         if self.noise:
             fitness = fitness + self._rng.normal(0.0, self.noise, size=fitness.shape)
         return fitness
+
+    def evaluate_noiseless(self, x: np.ndarray) -> np.ndarray:
+        """Evaluate the underlying objective with no observation noise.
+
+        For *reporting only* -- an optimizer must never call this, or a noisy
+        problem stops being noisy. Scoring a run's final answer with
+        :meth:`evaluate` takes a single draw from the noise distribution, which
+        can land below the true optimum and makes a noisy benchmark look like it
+        solved the problem better than the problem allows. Reporting is a
+        measurement of the returned point, not another turn of the search, so it
+        should use the objective rather than a sample of it.
+        """
+        x = np.atleast_2d(x)
+        return np.asarray(self.func(x), dtype=float).ravel()
 
     @property
     def lower(self) -> np.ndarray:

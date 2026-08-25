@@ -92,7 +92,7 @@ class DifferentialEvolution(BaseAlgorithm):
                 best_x = pop[new_best].copy()
             history.append(best_f)
 
-        true_best = float(problem.evaluate(best_x)[0])
+        true_best = float(problem.evaluate_noiseless(best_x)[0])
         return OptimizationResult(
             problem,
             best_x,
