@@ -35,7 +35,14 @@ _DEFAULT_FUNCTIONS: dict[str, tuple[Callable, int, Callable[[list[str]], str]]] 
     "neg": (lambda a: -a, 1, lambda c: f"(-{c[0]})"),
     "sin": (np.sin, 1, lambda c: f"sin({c[0]})"),
     "cos": (np.cos, 1, lambda c: f"cos({c[0]})"),
-    "exp": (lambda a: np.exp(np.clip(a, -50.0, 50.0)), 1, lambda c: f"exp({c[0]})"),
+    # Clipped at the float64 limit (exp(709.78) is the largest finite double), not
+    # at a convenient small number. A tight clamp turns exp into a *saturating*
+    # operator, and the search will exploit that: log(exp(u)) reads as u but
+    # computes min(u, clamp), a free sigmoid that no rendering shows and that
+    # sympy -- which simplifies log(exp(u)) to u -- cannot see either. The
+    # symbolic and numeric layers have to agree or the recovery metric scores a
+    # different function than the model computes.
+    "exp": (lambda a: np.exp(np.clip(a, -700.0, 700.0)), 1, lambda c: f"exp({c[0]})"),
     "log": (lambda a: np.log(np.clip(a, 1e-9, None)), 1, lambda c: f"log({c[0]})"),
     "sq": (lambda a: a * a, 1, lambda c: f"({c[0]})**2"),
 }
@@ -251,7 +258,7 @@ def _simplify(node: Node, functions: dict) -> Node:
         if op == "neg" and a.op == "neg":
             return a.args[0]
         # NOTE: exp(log(x)) -> x and log(exp(x)) -> x are *not* valid rewrites
-        # here. ``log`` clips its argument to 1e-9 and ``exp`` clips to +/-50, so
+        # here. ``log`` clips its argument to 1e-9 and ``exp`` clips to +/-700, so
         # the protected pair is not the identity outside those domains --
         # exp(log(-3)) evaluates to 1e-9, not -3. Applying the rewrite silently
         # changes the model's predictions. Do not reintroduce them without an
