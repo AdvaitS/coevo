@@ -83,7 +83,7 @@ class ParticleSwarmOptimization(BaseAlgorithm):
                 gbest = pbest[gbest_idx].copy()
             history.append(gbest_f)
 
-        true_best = float(problem.evaluate(gbest)[0])
+        true_best = float(problem.evaluate_noiseless(gbest)[0])
         return OptimizationResult(
             problem,
             gbest,
