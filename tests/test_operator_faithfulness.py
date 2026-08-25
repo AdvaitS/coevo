@@ -56,7 +56,7 @@ def test_nested_exponentials_stay_faithful(scale):
 
 
 def test_log_still_guards_its_domain():
-    """log(x) for x <= 0 must not produce nan; the domain guard stays."""
+    """log outside its domain makes the individual invalid, not a clamped value.\n\n    Clamping to 1e-9 invents a real value for log of a negative number, so the\n    model computes something its own rendering does not.\n    """
     X = np.array([[-5.0], [0.0], [1.0]])
     got = _raw_eval(_tree("log", X0), X, BASE_FUNCTIONS)
     assert got is None or np.all(np.isfinite(got))
