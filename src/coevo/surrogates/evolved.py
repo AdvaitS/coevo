@@ -365,6 +365,42 @@ class ParetoModel:
         return f"{self.expression}  [rmse={self.rmse:.4g}, complexity={self.complexity}]"
 
 
+def structure_signature(node: Node) -> str:
+    """The tree's shape, with every constant collapsed to a placeholder.
+
+    Two expressions share a signature exactly when they differ only in their
+    constants. Argument order is *not* canonicalised: the signature has to line
+    up positionally with the constants collected by ``_collect_constants``, and
+    sorting commutative arguments would break that correspondence. The cost is
+    a few missed cache hits; the alternative is silently writing one structure's
+    constants into another's.
+    """
+    if node.op == "x":
+        return f"x{node.idx}"
+    if node.op == "c":
+        return "C"
+    return f"{node.op}({','.join(structure_signature(a) for a in node.args)})"
+
+
+# Constant memoisation was built here and removed. The idea: a GP run spends
+# most of its evaluations on shapes it has already tried (measured on biosym's
+# benchmark, ~18,600 evaluations per run cover ~2,500 distinct structures, so
+# 87% are repeats), so remembering the best constants per structure and reusing
+# them should turn repeats into accumulating refinement.
+#
+# Measured over 7 laws x 12 seeds, 84 runs per arm:
+#
+#     memoisation   median RMSE   ground-truth recovery   wall clock
+#     off              0.0800          23/84                285s
+#     on               0.0798          14/84                322s
+#
+# No accuracy gain, 13% slower, and recovery moves the wrong way (Fisher
+# p=0.136 -- not significant, but consistently negative across two passes).
+# The premise was wrong: repeat structures are not wasted work, they are how
+# the GP searches constant space, and freezing each shape at its best-so-far
+# constants removes that search. Recorded here so it is not rebuilt.
+
+
 def optimize_tree_constants(
     tree: Node,
     X: np.ndarray,
@@ -444,6 +480,10 @@ class SymbolicRegressor:
         linear_scaling: bool = True,
         optimize_every: int = 0,
         optimize_top_k: int = 3,
+        semantic_p: float = 0.0,
+        library_size: int = 400,
+        library_depth: int = 2,
+        semantic_refit: bool = True,
     ) -> None:
         self.population_size = population_size
         self.generations = generations
@@ -457,6 +497,10 @@ class SymbolicRegressor:
         self.const_range = const_range
         self.refine = refine
         self.linear_scaling = linear_scaling
+        self.semantic_p = semantic_p
+        self.library_size = library_size
+        self.library_depth = library_depth
+        self.semantic_refit = semantic_refit
         self.optimize_every = optimize_every
         self.optimize_top_k = optimize_top_k
         self._functions = dict(_DEFAULT_FUNCTIONS)
@@ -485,7 +529,9 @@ class SymbolicRegressor:
         self.hall_of_fame_ = {}
 
         def _score(trees: list[Node]) -> np.ndarray:
-            """Penalised fitness for a population, recording each size's best."""
+            """Penalised fitness for a population, recording each size's best.
+
+            """
             out = np.empty(len(trees))
             for i, tree in enumerate(trees):
                 out[i], rmse = _fitness(
@@ -499,6 +545,15 @@ class SymbolicRegressor:
                     a, b = self._scaling_for(tree, X, y)
                     self.hall_of_fame_[complexity] = (float(rmse), tree, a, b)
             return out
+
+        library = None
+        if self.semantic_p > 0.0:
+            from coevo.semantic import build_library
+
+            library = build_library(
+                rng, X, self._functions, self.const_range,
+                self.library_size, self.library_depth,
+            )
 
         pop = [
             _random_node(rng, dim, 0, self.max_depth, self.const_range, self._functions)
@@ -545,6 +600,36 @@ class SymbolicRegressor:
                     c1, c2 = p1, p2
                 c1 = _mutate(rng, c1, dim, self.max_depth, self.max_size, self._functions, self.const_range) if rng.random() < self.mutation_p else c1
                 c2 = _mutate(rng, c2, dim, self.max_depth, self.max_size, self._functions, self.const_range) if rng.random() < self.mutation_p else c2
+                if library is not None:
+                    # Semantic mutation: told what the node must output, rather
+                    # than guessing. Applied on top of ordinary mutation so it
+                    # adds a capability instead of replacing exploration.
+                    from coevo.semantic import random_desired_operator
+
+                    for slot in (0, 1):
+                        if rng.random() >= self.semantic_p:
+                            continue
+                        child = c1 if slot == 0 else c2
+                        installed = random_desired_operator(
+                            rng, child, X, y, self._functions, library,
+                            self.max_size, self.linear_scaling,
+                        )
+                        if installed is not child and self.semantic_refit:
+                            # A subtree arriving from the library brings the
+                            # library's constants, which suit the desired vector
+                            # rather than this position. Without a refit the new
+                            # structure is judged on constants that were never
+                            # meant for it and dies in the next tournament --
+                            # measured: semantic mutation raises how often
+                            # Michaelis-Menten's structure is generated from 2/15
+                            # runs to 12/15, while recovery does not improve.
+                            installed = optimize_tree_constants(
+                                installed, X, y, self._functions, self.linear_scaling
+                            )
+                        if slot == 0:
+                            c1 = installed
+                        else:
+                            c2 = installed
                 new_pop.extend((c1, c2))
             pop = new_pop[: self.population_size]
             fits = _score(pop)
