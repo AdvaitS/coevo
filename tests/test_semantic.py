@@ -4,13 +4,14 @@ import numpy as np
 import pytest
 
 from coevo.semantic import (
+    _canonical_templates,
     build_library,
     desired_semantics,
     invert,
     random_desired_operator,
 )
 from coevo.surrogates.evolved import _DEFAULT_FUNCTIONS as FUNCTIONS
-from coevo.surrogates.evolved import Node, _eval, linear_scale
+from coevo.surrogates.evolved import Node, _eval, _size, linear_scale, structure_signature
 
 X = np.linspace(0.2, 5.0, 40).reshape(-1, 1)
 x = X[:, 0]
@@ -72,6 +73,46 @@ def test_library_entries_have_distinct_semantics():
     outputs = {np.array2string(np.round(o, 8), threshold=64) for _, o in library}
     assert len(outputs) == len(library)
     assert all(np.all(np.isfinite(o)) for _, o in library)
+
+
+PLAIN = {k: FUNCTIONS[k] for k in ("+", "-", "*", "/", "neg", "exp", "log", "sq")}
+
+
+def test_canonical_templates_only_use_available_operators():
+    """Templates are built only from operators the caller actually has."""
+    nodes = _canonical_templates(PLAIN, np.linspace(-5.0, 5.0, 4))
+    assert len(nodes) > 0
+    allowed = set(PLAIN) | {"x", "c"}
+
+    def ops_of(node):
+        acc = {node.op}
+        for a in node.args:
+            acc |= ops_of(a)
+        return acc
+
+    for node in nodes:
+        assert ops_of(node) <= allowed
+    # strip exp/log/sq and every template needing them must vanish
+    minimal = {k: FUNCTIONS[k] for k in ("+", "-", "*", "/", "neg")}
+    minimal_nodes = _canonical_templates(minimal, np.linspace(-5.0, 5.0, 4))
+    assert all(ops_of(n) <= (set(minimal) | {"x", "c"}) for n in minimal_nodes)
+    assert len(minimal_nodes) < len(nodes)
+
+
+def test_template_library_adds_deep_structures():
+    """Templates install depth-3 pieces a depth-2 random library cannot contain."""
+    rng = np.random.default_rng(0)
+    shallow = build_library(rng, X, PLAIN, size=400, max_depth=2, templates=False)
+    deep = build_library(rng, X, PLAIN, size=400, max_depth=2, templates=True)
+    shallow_sigs = {structure_signature(n) for n, _ in shallow}
+    deep_sigs = {structure_signature(n) for n, _ in deep}
+    # a Gompertz inner term exp(c·exp(c·x)) is depth 4 — reachable only via templates
+    gompertz = "exp(*(C,exp(*(C,x0))))"
+    assert gompertz not in shallow_sigs
+    assert gompertz in deep_sigs
+    assert max(_size(n) for n, _ in shallow) <= 7
+    assert max(_size(n) for n, _ in deep) >= 7
+    assert len(deep) == len(shallow) == 400, "templates displace random fill, not inflate it"
 
 
 def test_operator_returns_a_valid_tree_and_respects_max_size():

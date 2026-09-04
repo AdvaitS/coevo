@@ -484,6 +484,7 @@ class SymbolicRegressor:
         library_size: int = 400,
         library_depth: int = 2,
         semantic_refit: bool = True,
+        library_templates: bool = False,
     ) -> None:
         self.population_size = population_size
         self.generations = generations
@@ -501,6 +502,7 @@ class SymbolicRegressor:
         self.library_size = library_size
         self.library_depth = library_depth
         self.semantic_refit = semantic_refit
+        self.library_templates = library_templates
         self.optimize_every = optimize_every
         self.optimize_top_k = optimize_top_k
         self._functions = dict(_DEFAULT_FUNCTIONS)
@@ -553,6 +555,7 @@ class SymbolicRegressor:
             library = build_library(
                 rng, X, self._functions, self.const_range,
                 self.library_size, self.library_depth,
+                templates=self.library_templates,
             )
 
         pop = [

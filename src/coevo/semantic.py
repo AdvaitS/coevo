@@ -33,12 +33,15 @@ zero.
 
 from __future__ import annotations
 
+from typing import Callable
+
 import numpy as np
 
 from coevo.surrogates.evolved import (
     Node,
     _deep_copy,
     _eval,
+    _MAGNITUDE_LIMIT,
     _size,
     linear_scale,
 )
@@ -171,9 +174,133 @@ def _propagate(tree: Node, path: tuple, target: np.ndarray, X: np.ndarray, funct
     return target
 
 
+def _canonical_templates(
+    functions: dict, const_values: np.ndarray
+) -> list[Node]:
+    """Curated depth-2/3 building-block subtrees, one per constant assignment.
+
+    The random library at ``max_depth=2`` supplies the depth-1 pieces that
+    Michaelis-Menten needs (``K + x``) but not the depth-3 pieces that logistic
+    and Gompertz need: a sigmoid is ``c / (c + exp(c·x))`` and a Gompertz inner
+    term is ``exp(c · exp(c·x))``, each several nodes deep. Building the random
+    library at depth 3 supplies those shapes but *dilutes* matching — measured,
+    Michaelis-Menten generation falls from 12/15 to 7/15 as the library grows.
+
+    These templates supply the missing shapes directly, as a small number of
+    meaningful entries rather than a large number of random ones. Every template
+    is instantiated over ``const_values``; constants are refit after install, so
+    the grid only has to land a shape close enough to be selected, not nail the
+    parameters. Only templates whose operators are all present in ``functions``
+    are produced. Templates are single-feature (built on ``x0``); the random
+    library already supplies every feature as a terminal, and the growth/response
+    laws these target are univariate.
+
+    Measured on biosym's benchmark (plain operators, gen=25, pop=200, 4 seeds),
+    comparing semantic backpropagation with and without templates, by how often
+    the ground-truth structure is *generated* during search:
+
+    ==================  ===========  ===========  ===========
+    law                 plain       semantic     +templates
+    ==================  ===========  ===========  ===========
+    michaelis_menten    0/4          1/4          4/4
+    logistic_growth     0/4          0/4          3/4
+    gompertz_growth     0/4          0/4          2/4
+    ==================  ===========  ===========  ===========
+
+    Generation is no longer the wall. It is still not recovery: the structure
+    reaches the returned Pareto front in ~1/4 runs and is sympy-confirmed as the
+    law in 0/4, the same "inner optimizer loses correct skeletons" gap recorded
+    elsewhere. Templates are a necessary building block, not the whole answer.
+    """
+    import itertools
+
+    def C(v: float) -> Node:
+        return Node("c", val=float(v))
+
+    def X() -> Node:
+        return Node("x", idx=0)
+
+    def has(*ops: str) -> bool:
+        return all(op in functions for op in ops)
+
+    # (arity, builder) pairs. Each builder maps its constants to a subtree.
+    specs: list[tuple[int, Callable[..., Node]]] = []
+    if has("/", "+"):
+        specs.append((1, lambda a: Node("/", (X(), Node("+", (C(a), X()))))))  # x/(c+x)
+        specs.append(
+            (2, lambda a, b: Node("/", (X(), Node("+", (C(a), Node("*", (C(b), X())))))))
+        )  # x/(c+cx)
+    if has("sq", "/", "+"):
+        specs.append(
+            (
+                1,
+                lambda a: Node(
+                    "/", (Node("sq", (X(),)), Node("+", (C(a), Node("sq", (X(),)))))
+                ),
+            )
+        )  # sq(x)/(c+sq(x))
+    if has("exp", "*"):
+        specs.append((1, lambda a: Node("exp", (Node("*", (C(a), X())),))))  # exp(cx)
+        specs.append(
+            (2, lambda a, b: Node("exp", (Node("*", (C(a), Node("exp", (Node("*", (C(b), X())),)))),)))
+        )  # exp(c·exp(cx))
+    if has("exp", "+", "*"):
+        specs.append(
+            (2, lambda a, b: Node("exp", (Node("+", (C(a), Node("*", (C(b), X())))),)))
+        )  # exp(c+cx)
+    if has("exp", "/", "+", "*"):
+        specs.append(
+            (
+                2,
+                lambda a, b: Node(
+                    "/",
+                    (
+                        Node("c", val=1.0),
+                        Node(
+                            "+",
+                            (
+                                Node("c", val=1.0),
+                                Node(
+                                    "exp",
+                                    (Node("+", (C(a), Node("*", (C(b), X())))),),
+                                ),
+                            ),
+                        ),
+                    ),
+                ),
+            )
+        )  # 1/(1+exp(c+cx)) — logistic (the two 1s are the sigmoid's, not fitted)
+    if has("exp", "*", "-"):
+        specs.append(
+            (
+                3,
+                lambda a, b, d: Node(
+                    "-", (C(a), Node("*", (C(b), Node("exp", (Node("*", (C(d), X())),)))))
+                ),
+            )
+        )  # c - c·exp(cx) — exponential association
+    if has("log", "+", "*"):
+        specs.append(
+            (2, lambda a, b: Node("log", (Node("+", (C(a), Node("*", (C(b), X())))),)))
+        )  # log(c+cx)
+
+    out: list[Node] = []
+    for arity, builder in specs:
+        for combo in itertools.product(const_values.tolist(), repeat=arity):
+            out.append(builder(*combo))
+    return out
+
+
+#: How many grid values each template constant takes. Coarse on purpose: three
+#: constants at five values each would be 125 near-identical entries that dilute
+#: matching, and the operator refits constants after install anyway.
+_TEMPLATE_GRID_SIZE = 4
+
+
 def build_library(
     rng: np.random.Generator, X: np.ndarray, functions: dict,
     const_range: tuple[float, float] = (-5.0, 5.0), size: int = 400, max_depth: int = 2,
+    templates: bool = False,
 ) -> list[tuple[Node, np.ndarray]]:
     """Small subtrees with their outputs precomputed on ``X``.
 
@@ -187,6 +314,10 @@ def build_library(
     Going deeper costs matching time linearly and risks installing whole
     solutions rather than missing pieces, which would turn the search into random
     sampling over the library.
+
+    ``templates`` additionally installs the curated depth-2/3 building blocks
+    from :func:`_canonical_templates` before the random fill, so the deep pieces
+    a growth law needs are available without deepening the random library.
     """
     from coevo.surrogates.evolved import _random_node
 
@@ -201,6 +332,11 @@ def build_library(
             return
         if out.shape != (len(X),) or not np.all(np.isfinite(out)):
             return
+        # Reject entries that run away: a subtree reaching the float limit is
+        # not a useful building block, and rounding it for the dedup key
+        # overflows. Mirrors the GP's own magnitude limit.
+        if np.any(np.abs(out) > _MAGNITUDE_LIMIT):
+            return
         key = np.array2string(np.round(out, 8), threshold=64)
         if key in seen:
             return
@@ -211,6 +347,10 @@ def build_library(
         add(Node("x", idx=i))
     for value in np.linspace(const_range[0], const_range[1], 21):
         add(Node("c", val=float(value)))
+    if templates:
+        grid = np.linspace(const_range[0], const_range[1], _TEMPLATE_GRID_SIZE)
+        for node in _canonical_templates(functions, grid):
+            add(node)
     guard = 0
     while len(library) < size and guard < size * 40:
         guard += 1
@@ -226,7 +366,11 @@ def _match(library: list[tuple[Node, np.ndarray]], desired: np.ndarray) -> Node 
     target = desired[valid]
     best, best_err = None, np.inf
     for node, out in library:
-        err = float(np.mean((out[valid] - target) ** 2))
+        diff = out[valid] - target
+        with np.errstate(over="ignore", invalid="ignore"):
+            err = float(np.mean(diff * diff))
+        if not np.isfinite(err):
+            continue
         if err < best_err:
             best, best_err = node, err
     return None if best is None else _deep_copy(best)
